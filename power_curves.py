@@ -4,9 +4,10 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from copy import deepcopy
 
-from qsm import LogProfile, NormalisedWindTable1D, KiteKinematics, SteadyState, TractionPhaseHybrid, TractionConstantElevation, SteadyStateError, TractionPhase
+from qsm import LogProfile, NormalisedWindTable1D, KiteKinematics, SteadyState, TractionPhaseHybrid, \
+    TractionConstantElevation, SteadyStateError, TractionPhase
 from kitepower_kites import sys_props_v3
-from cycle_optimizer import OptimizerCycle3
+from cycle_optimizer import OptimizerCycle
 from power_curve_constructor import PowerCurveConstructor
 
 # Assumptions representative reel-out state at cut-in wind speed.
@@ -216,21 +217,14 @@ def generate_power_curves(loc='mmc', n_clusters=8):
     # Cycle simulation settings for different phases of the power curves.
     cycle_sim_settings_pc_phase1 = {
         'cycle': {
-            # 'tether_length_start_retraction': le1,
-            # 'tether_length_end_retraction': le0,
-            # 'elevation_angle_traction': theta_out,
             'traction_phase': TractionPhase,
             'include_transition_energy': False,
         },
-        'retraction': {
-            # 'control': ('tether_force_ground', f_in),
-        },
+        'retraction': {},
         'transition': {
-            # 'control': ('reeling_speed', 0., f_in, f_out),
             'time_step': 0.25,
         },
         'traction': {
-            # 'control': ('tether_force_ground', f_out),
             'azimuth_angle': phi_ro,
             'course_angle': chi_ro,
         },
@@ -243,7 +237,7 @@ def generate_power_curves(loc='mmc', n_clusters=8):
 
     limits_refined = {'vw_100m_cut_in': [], 'vw_100m_cut_out': []}
     res_pcs = []
-    for i_profile in [1]:  #range(1, n_clusters+1):
+    for i_profile in range(1, n_clusters+1):
         # Pre-configure environment object for optimizations by setting normalized wind profile.
         env = create_environment(suffix, i_profile)
 
@@ -263,15 +257,15 @@ def generate_power_curves(loc='mmc', n_clusters=8):
         # active. It is assumed that sufficient cross-wind patterns are flown up to vw_100m = 7 m/s (verify this).
         # Therefore, the number of cross-wind patterns is not calculated for this phase. Also the upper elevation bound
         # is set to 30 degrees.
-        op_cycle_pc_phase1 = OptimizerCycle3(cycle_sim_settings_pc_phase1, sys_props_v3, env, reduce_x=np.array([0, 1, 2, 3]))
+        op_cycle_pc_phase1 = OptimizerCycle(cycle_sim_settings_pc_phase1, sys_props_v3, env, reduce_x=np.array([0, 1, 2, 3]))
         op_cycle_pc_phase1.bounds_real_scale[2][1] = 30*np.pi/180.
 
-        op_cycle_pc_phase2 = OptimizerCycle3(cycle_sim_settings_pc_phase2, sys_props_v3, env, reduce_x=np.array([0, 1, 2, 3]))
+        op_cycle_pc_phase2 = OptimizerCycle(cycle_sim_settings_pc_phase2, sys_props_v3, env, reduce_x=np.array([0, 1, 2, 3]))
 
         # Configuration of the sequential optimizations for which is differentiated between the wind speed ranges
         # bounded above by the wind speed of the dictionary key. If dx0 does not contain only zeros, the starting point
         # of the new optimization is not the solution of the preceding optimization.
-        op_seq_cycle3 = {
+        op_seq = {
             7.: {'power_optimizer': op_cycle_pc_phase1, 'dx0': np.array([0., 0., 0., 0., 0.])},
             17.: {'power_optimizer': op_cycle_pc_phase2, 'dx0': np.array([0., 0., 0., 0., 0.])},
             np.inf: {'power_optimizer': op_cycle_pc_phase2, 'dx0': np.array([0., 0., 0.1, 0., 0.])},  # Convergence for
@@ -287,8 +281,7 @@ def generate_power_curves(loc='mmc', n_clusters=8):
 
         # Start optimizations.
         pc = PowerCurveConstructor(wind_speeds)
-        pc.set_labels_bounds_and_system(op_cycle_pc_phase2)
-        pc.run_predefined_sequence(op_seq_cycle3, x0)
+        pc.run_predefined_sequence(op_seq, x0)
         pc.export_results('wind_resource/power_curve{}{}.pickle'.format(suffix, i_profile))
         res_pcs.append(pc)
 
@@ -300,15 +293,17 @@ def generate_power_curves(loc='mmc', n_clusters=8):
               "[{:.3f}, {:.3f}].".format(vw_cut_in, vw_cut_out, pc.wind_speeds[0], pc.wind_speeds[-1]))
 
         # Plot power curve together with that of the other wind profile shapes.
-        p_cycle = [kpis['average_power']['cycle'] for kpis in pc.performance_indicators[-1]]
+        p_cycle = [kpis['average_power']['cycle'] for kpis in pc.performance_indicators]
         ax_pcs[0].plot(pc.wind_speeds, p_cycle, label=i_profile)
         ax_pcs[1].plot(pc.wind_speeds/vw_cut_out, p_cycle, label=i_profile)
 
         pc.plot_optimal_trajectories()
-        pc.plot_optimization_results()
+        pc.plot_optimization_results(op_cycle_pc_phase2.OPT_VARIABLE_LABELS, op_cycle_pc_phase2.bounds_real_scale,
+                                     [sys_props_v3.tether_force_min_limit, sys_props_v3.tether_force_max_limit],
+                                     [sys_props_v3.reeling_speed_min_limit, sys_props_v3.reeling_speed_max_limit])
 
-        n_cwp = [kpis['n_crosswind_patterns'] for kpis in pc.performance_indicators[-1]]
-        export_to_csv(pc.wind_speeds, vw_cut_out, p_cycle, pc.x_opts[-1], n_cwp, i_profile, suffix)
+        n_cwp = [kpis['n_crosswind_patterns'] for kpis in pc.performance_indicators]
+        export_to_csv(pc.wind_speeds, vw_cut_out, p_cycle, pc.x_opts, n_cwp, i_profile, suffix)
     ax_pcs[1].legend()
 
     df = pd.DataFrame(limits_refined)
@@ -321,7 +316,7 @@ def generate_power_curves(loc='mmc', n_clusters=8):
     return res_pcs
 
 
-def plot_trajectories(loc='mmc', n_clusters=8, i_profile=1):
+def load_power_curve_results_and_plot_trajectories(loc='mmc', n_clusters=8, i_profile=1):
     """Plot trajectories from previously generated power curve."""
     pc = PowerCurveConstructor(None)
     suffix = '_{}{}{}'.format(n_clusters, loc, i_profile)
@@ -337,51 +332,51 @@ def compare_kpis(power_curves):
     fig_nums = [plt.figure().number for _ in range(5)]
     for pc in power_curves:
         plt.figure(fig_nums[0])
-        f_out_min = [kpis['min_tether_force']['out'] for kpis in pc.performance_indicators[-1]]
-        f_out_max = [kpis['max_tether_force']['out'] for kpis in pc.performance_indicators[-1]]
-        f_out = [x[0] for x in pc.x_opts[-1]]
+        f_out_min = [kpis['min_tether_force']['out'] for kpis in pc.performance_indicators]
+        f_out_max = [kpis['max_tether_force']['out'] for kpis in pc.performance_indicators]
+        f_out = [x[0] for x in pc.x_opts]
         p = plt.plot(pc.wind_speeds, f_out)
         clr = p[-1].get_color()
-        plt.plot(pc.wind_speeds, f_out_min, '', marker=6, color=clr, markersize=7, markerfacecolor="None")
-        plt.plot(pc.wind_speeds, f_out_max, '', marker=7, color=clr, markerfacecolor="None")
+        plt.plot(pc.wind_speeds, f_out_min, linestyle='None', marker=6, color=clr, markersize=7, markerfacecolor="None")
+        plt.plot(pc.wind_speeds, f_out_max, linestyle='None', marker=7, color=clr, markerfacecolor="None")
         plt.grid(True)
-        plt.xlabel('$v_{w,100m}$ [N]')
+        plt.xlabel('$v_{w,100m}$ [m/s]')
         plt.ylabel('Reel-out force [N]')
 
         plt.figure(fig_nums[1])
-        f_in_min = [kpis['min_tether_force']['in'] for kpis in pc.performance_indicators[-1]]
-        f_in_max = [kpis['max_tether_force']['in'] for kpis in pc.performance_indicators[-1]]
-        f_in = [x[1] for x in pc.x_opts[-1]]
+        f_in_min = [kpis['min_tether_force']['in'] for kpis in pc.performance_indicators]
+        f_in_max = [kpis['max_tether_force']['in'] for kpis in pc.performance_indicators]
+        f_in = [x[1] for x in pc.x_opts]
         p = plt.plot(pc.wind_speeds, f_in)
         clr = p[-1].get_color()
-        plt.plot(pc.wind_speeds, f_in_min, '', marker=6, color=clr, markersize=7, markerfacecolor="None")
-        plt.plot(pc.wind_speeds, f_in_max, '', marker=7, color=clr, markerfacecolor="None")
+        plt.plot(pc.wind_speeds, f_in_min, linestyle='None', marker=6, color=clr, markersize=7, markerfacecolor="None")
+        plt.plot(pc.wind_speeds, f_in_max, linestyle='None', marker=7, color=clr, markerfacecolor="None")
         plt.grid(True)
-        plt.xlabel('$v_{w,100m}$ [N]')
+        plt.xlabel('$v_{w,100m}$ [m/s]')
         plt.ylabel('Reel-in force [N]')
 
         plt.figure(fig_nums[2])
-        f_in_min = [kpis['min_reeling_speed']['out'] for kpis in pc.performance_indicators[-1]]
-        f_in_max = [kpis['max_reeling_speed']['out'] for kpis in pc.performance_indicators[-1]]
+        f_in_min = [kpis['min_reeling_speed']['out'] for kpis in pc.performance_indicators]
+        f_in_max = [kpis['max_reeling_speed']['out'] for kpis in pc.performance_indicators]
         p = plt.plot(pc.wind_speeds, f_in_min)
         clr = p[-1].get_color()
-        plt.plot(pc.wind_speeds, f_in_max, '', marker=6, color=clr, markerfacecolor="None")
+        plt.plot(pc.wind_speeds, f_in_max, linestyle='None', marker=7, color=clr, markerfacecolor="None")
         plt.grid(True)
-        plt.xlabel('$v_{w,100m}$ [N]')
+        plt.xlabel('$v_{w,100m}$ [m/s]')
         plt.ylabel('Reel-out speed [m/s]')
 
         plt.figure(fig_nums[3])
-        n_cwp = [kpis['n_crosswind_patterns'] for kpis in pc.performance_indicators[-1]]
+        n_cwp = [kpis['n_crosswind_patterns'] for kpis in pc.performance_indicators]
         plt.plot(pc.wind_speeds, n_cwp)
         plt.grid(True)
-        plt.xlabel('$v_{w,100m}$ [N]')
+        plt.xlabel('$v_{w,100m}$ [m/s]')
         plt.ylabel('Number of cross-wind patterns [-]')
 
         plt.figure(fig_nums[4])
-        elev_angles = [x_opt[2]*180./np.pi for x_opt in pc.x_opts[-1]]
+        elev_angles = [x_opt[2]*180./np.pi for x_opt in pc.x_opts]
         plt.plot(pc.wind_speeds, elev_angles)
         plt.grid(True)
-        plt.xlabel('$v_{w,100m}$ [N]')
+        plt.xlabel('$v_{w,100m}$ [m/s]')
         plt.ylabel('Reel-out elevation angle [deg]')
 
 

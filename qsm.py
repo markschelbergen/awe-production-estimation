@@ -2223,6 +2223,9 @@ class Cycle(TimeSeries):
         self.follow_wind = cycle_settings.get('follow_wind', False)
         self.include_transition_energy = cycle_settings.get('include_transition_energy', True)
 
+        self.duty_cycle = None
+        self.pumping_efficiency = None
+
     def run_simulation(self, system_properties, environment_state, steady_state_config={},
                        enable_limit_violation_error=False, print_summary=False):
         """Consecutively run the simulations of the 3 phases.
@@ -2341,6 +2344,12 @@ class Cycle(TimeSeries):
             print("Retraction power: {:.1f}W".format(retr.average_power))
             print("Transition power: {:.1f}W".format(trans.average_power))
             print("Traction power: {:.1f}W".format(trac.average_power))
+
+        self.duty_cycle = trac.duration/self.duration
+        try:
+            self.pumping_efficiency = self.energy/trac.energy
+        except FloatingPointError:
+            self.pumping_efficiency = 0.
 
         return error_in_phase, self.average_power
 
