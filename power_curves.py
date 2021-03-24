@@ -145,12 +145,12 @@ def export_to_csv(v, v_cut_out, p, x_opts, n_cwp, i_profile, suffix):
         'n_crosswind_patterns [-]': n_cwp,
     }
     df = pd.DataFrame(df)
-    df.to_csv('wind_resource/power_curve{}{}.csv'.format(suffix, i_profile), index=False, sep=";")
+    df.to_csv('output/power_curve{}{}.csv'.format(suffix, i_profile), index=False, sep=";")
 
 
 def create_environment(suffix, i_profile):
     """Flatten wind profile shapes resulting from the clustering and use to create the environment object."""
-    df = pd.read_csv('wind_profile_shapes/'+'profile{}{}.csv'.format(suffix, i_profile), sep=";")
+    df = pd.read_csv('wind_resource/'+'profile{}{}.csv'.format(suffix, i_profile), sep=";")
     env = NormalisedWindTable1D()
     env.heights = list(df['h [m]'])
     env.normalised_wind_speeds = list((df['u1 [-]']**2 + df['v1 [-]']**2)**.5)
@@ -196,8 +196,8 @@ def estimate_wind_speed_operational_limits(loc='mmc', n_clusters=8):
     df = pd.DataFrame(res)
     print(df)
 
-    if not os.path.exists('wind_resource/wind_limits_estimate{}.csv'.format(suffix)):
-        df.to_csv('wind_resource/wind_limits_estimate{}.csv'.format(suffix))
+    if not os.path.exists('output/wind_limits_estimate{}.csv'.format(suffix)):
+        df.to_csv('output/wind_limits_estimate{}.csv'.format(suffix))
     else:
         print("Skipping exporting operational limits.")
 
@@ -212,7 +212,7 @@ def estimate_wind_speed_operational_limits(loc='mmc', n_clusters=8):
 def generate_power_curves(loc='mmc', n_clusters=8):
     """Determine power curves - requires estimates of the cut-in and cut-out wind speed to be available."""
     suffix = '_{}{}'.format(n_clusters, loc)
-    limit_estimates = pd.read_csv('wind_resource/wind_limits_estimate{}.csv'.format(suffix))
+    limit_estimates = pd.read_csv('output/wind_limits_estimate{}.csv'.format(suffix))
 
     # Cycle simulation settings for different phases of the power curves.
     cycle_sim_settings_pc_phase1 = {
@@ -282,7 +282,7 @@ def generate_power_curves(loc='mmc', n_clusters=8):
         # Start optimizations.
         pc = PowerCurveConstructor(wind_speeds)
         pc.run_predefined_sequence(op_seq, x0)
-        pc.export_results('wind_resource/power_curve{}{}.pickle'.format(suffix, i_profile))
+        pc.export_results('output/power_curve{}{}.pickle'.format(suffix, i_profile))
         res_pcs.append(pc)
 
         # Refine the wind speed operational limits to wind speeds for which optimal solutions are found.
@@ -308,8 +308,8 @@ def generate_power_curves(loc='mmc', n_clusters=8):
 
     df = pd.DataFrame(limits_refined)
     print(df)
-    if not os.path.exists('wind_resource/wind_limits_refined{}.csv'.format(suffix)):
-        df.to_csv('wind_resource/wind_limits_refined{}.csv'.format(suffix))
+    if not os.path.exists('output/wind_limits_refined{}.csv'.format(suffix)):
+        df.to_csv('output/wind_limits_refined{}.csv'.format(suffix))
     else:
         print("Skipping exporting operational limits.")
 
@@ -320,7 +320,7 @@ def load_power_curve_results_and_plot_trajectories(loc='mmc', n_clusters=8, i_pr
     """Plot trajectories from previously generated power curve."""
     pc = PowerCurveConstructor(None)
     suffix = '_{}{}{}'.format(n_clusters, loc, i_profile)
-    pc.import_results('wind_resource/power_curve{}.pickle'.format(suffix))
+    pc.import_results('output/power_curve{}.pickle'.format(suffix))
     pc.plot_optimal_trajectories(wind_speed_ids=[0, 9, 18, 33, 48, 64])
     plt.gcf().set_size_inches(5.5, 3.5)
     plt.subplots_adjust(top=0.99, bottom=0.1, left=0.12, right=0.65)

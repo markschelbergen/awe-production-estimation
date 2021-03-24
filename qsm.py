@@ -1900,16 +1900,16 @@ class LissajousPattern:
 
     def get_properties_along_curve(self, s):
         # Elevation and azimuth as function of normalized arc length.
-        theta = self.elevation_max * np.sin(4 * np.pi * s)  # [rad]
+        beta = self.elevation_max * np.sin(4 * np.pi * s)  # [rad]
         phi = self.azimuth_max * np.sin(2 * np.pi * s)  # [rad]
 
         # Derivatives wrt normalized arc length.
-        dtheta_ds = 4 * np.pi * self.elevation_max * np.cos(4 * np.pi * s)  # [-]
+        dbeta_ds = 4 * np.pi * self.elevation_max * np.cos(4 * np.pi * s)  # [-]
         dphi_ds = 2 * np.pi * self.azimuth_max * np.cos(2 * np.pi * s)  # [-]
 
-        chi = np.arctan2(dphi_ds, -dtheta_ds)
+        chi = np.arctan2(dphi_ds, -dbeta_ds)
 
-        return theta, phi, chi, dtheta_ds, dphi_ds
+        return beta, phi, chi, dbeta_ds, dphi_ds
 
     def calc_curve_length_unit_sphere(self):
         # Curve length of pattern on unit sphere.
@@ -1918,8 +1918,8 @@ class LissajousPattern:
         curve_length = 0.
 
         for s in s_range:
-            dtheta_ds, dphi_ds = self.get_properties_along_curve(s)[3:]
-            curve_length += np.sqrt(dtheta_ds**2 + dphi_ds**2) * ds
+            dbeta_ds, dphi_ds = self.get_properties_along_curve(s)[3:]
+            curve_length += np.sqrt(dbeta_ds**2 + dphi_ds**2) * ds
 
         return curve_length
 
@@ -1938,14 +1938,14 @@ class LookupPattern:
 
     def get_properties_along_curve(self, s):
         phi = np.interp(s, self.lookup_table['s'], self.lookup_table['azimuth'])
-        theta = np.interp(s, self.lookup_table['s'], self.lookup_table['elevation'])
+        beta = np.interp(s, self.lookup_table['s'], self.lookup_table['elevation'])
 
         i = (self.lookup_table['s'] > s).idxmax()
         dphi = self.lookup_table['azimuth'].iloc[i] - self.lookup_table['azimuth'].iloc[i - 1]
-        dtheta = self.lookup_table['elevation'].iloc[i] - self.lookup_table['elevation'].iloc[i - 1]
-        chi = np.arctan2(dphi, -dtheta)
+        dbeta = self.lookup_table['elevation'].iloc[i] - self.lookup_table['elevation'].iloc[i - 1]
+        chi = np.arctan2(dphi, -dbeta)
 
-        return theta, phi, chi
+        return beta, phi, chi
 
 
 class TractionPhasePattern(Phase):
@@ -1974,8 +1974,8 @@ class TractionPhasePattern(Phase):
         """Finalize the initial state and ending criteria before running the simulation, respectively `kinematics_start`
         and `position_end`. Furthermore, calculating `delta_path_angle`."""
         elevation_angle_ref = self.elevation_angle.calculate(self.tether_length_start)
-        theta, phi, chi = self.pattern.get_properties_along_curve(self.n_crosswind_patterns % 1)[:3]
-        self.kinematics_start = KiteKinematics(self.tether_length_start, phi, elevation_angle_ref+theta, chi)
+        beta, phi, chi = self.pattern.get_properties_along_curve(self.n_crosswind_patterns % 1)[:3]
+        self.kinematics_start = KiteKinematics(self.tether_length_start, phi, elevation_angle_ref+beta, chi)
         self.position_end = KitePosition(straight_tether_length=self.tether_length_end)
 
     def determine_new_kinematics(self, last_kinematics, last_steady_state):
@@ -2021,8 +2021,8 @@ class TractionPhasePattern(Phase):
         d_cross_wind_distance = last_steady_state.kite_tangential_speed * self.time_step
 
         self.n_crosswind_patterns += d_cross_wind_distance / pattern_length
-        theta, phi, chi = self.pattern.get_properties_along_curve(self.n_crosswind_patterns % 1)[:3]
-        kin.elevation_angle = elevation_angle_ref + theta
+        beta, phi, chi = self.pattern.get_properties_along_curve(self.n_crosswind_patterns % 1)[:3]
+        kin.elevation_angle = elevation_angle_ref + beta
         kin.azimuth_angle = phi
         kin.course_angle = chi
         kin.update()
@@ -2082,12 +2082,12 @@ class EvaluatePattern(Phase):  # Determine performance along cross wind pattern 
         self.steady_state_config = steady_state_config
 
         pattern_length = self.pattern.curve_length_unit_sphere * self.tether_length
-        cos_phi, cos_theta, cos_chi = [], [], []
+        cos_phi, cos_beta, cos_chi = [], [], []
         valid_pattern = True
         for s in self.s:
-            theta, phi, chi = self.pattern.get_properties_along_curve(s)[:3]
+            beta, phi, chi = self.pattern.get_properties_along_curve(s)[:3]
 
-            kin = KiteKinematics(self.tether_length, phi, self.elevation_angle_ref + theta, chi)
+            kin = KiteKinematics(self.tether_length, phi, self.elevation_angle_ref + beta, chi)
             self.kinematics.append(kin)
 
             # Add first time point, kite kinematics, and steady state to corresponding result lists.
@@ -2099,7 +2099,7 @@ class EvaluatePattern(Phase):  # Determine performance along cross wind pattern 
             self.steady_states.append(ss)
 
             cos_phi.append(np.cos(kin.azimuth_angle))
-            cos_theta.append(np.cos(kin.elevation_angle))
+            cos_beta.append(np.cos(kin.elevation_angle))
             cos_chi.append(np.cos(kin.course_angle))
 
             if s != self.s[-1]:
@@ -2138,7 +2138,7 @@ class EvaluatePattern(Phase):  # Determine performance along cross wind pattern 
                 t_last = t
             print("Flying down [%]:", flying_down/pattern_duration*100.)
             print("Representative azimuth angle [deg]:", np.arccos(np.trapz(cos_phi, self.time)/pattern_duration)*180./np.pi)
-            print("Representative elevation angle [deg]:", np.arccos(np.trapz(cos_theta, self.time)/pattern_duration)*180./np.pi)
+            print("Representative elevation angle [deg]:", np.arccos(np.trapz(cos_beta, self.time)/pattern_duration)*180./np.pi)
             print("Representative course angle [deg]:", np.arccos(np.trapz(cos_chi, self.time)/pattern_duration)*180./np.pi)
 
         return pattern_duration

@@ -4,8 +4,8 @@ import pickle
 import matplotlib.pyplot as plt
 
 
-wind_speed_probability_file = "wind_profile_shapes/freq_distribution_v3{}.pickle"
-power_curve_file = 'wind_resource/power_curve{}{}.csv'
+wind_speed_probability_file = "wind_resource/freq_distribution_v3{}.pickle"
+power_curve_file = 'output/power_curve{}{}.csv'
 
 
 def get_mask_discontinuities(df):
