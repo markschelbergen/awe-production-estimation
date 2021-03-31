@@ -11,7 +11,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from copy import copy
 import pandas as pd
-from awe_quasi_steady_model.utils import zip_el, plot_traces, default_colors
+from utils import zip_el, plot_traces
 
 np.seterr(all='raise')
 
@@ -989,7 +989,7 @@ class TimeSeries:
         energy (float): Energy produced in the evaluated time interval [J].
         average_power (float): Time average of the produced power [W].
         duration (float): Length of evaluated time interval [s].
-        
+
     """
     def __init__(self):
         # Result lists with time and states.
@@ -2363,7 +2363,7 @@ class Cycle(TimeSeries):
         if fig_num is None:
             plt.figure()
         fig_num = plt.gcf().number
-        plot_kwargs = {'color': 'k'}  #default_colors[2]}
+        plot_kwargs = {'color': 'k'}
         self.retraction_phase.trajectory_plot3d(fig_num=fig_num, animation=False, plot_kwargs=plot_kwargs)
         self.transition_phase.trajectory_plot3d(fig_num=fig_num, animation=False, plot_kwargs=plot_kwargs)
         self.traction_phase.trajectory_plot3d(fig_num=fig_num, animation=False, plot_kwargs=plot_kwargs)
