@@ -800,7 +800,7 @@ class SteadyState:
             f_aero_theta = -(.5*m_tether + m)*g*np.sin(theta)  # tangential aerodynamic force
 
         # Iterative procedure to determine the angle of attack.
-        if system_properties.__class__.__name__ == "SysPropsAerodynamicCurves":
+        if system_properties.__class__.__name__ == "SysPropsAeroCurves":
             update_aero_coefficients = True
             alpha = 15*np.pi/180.  # Initial assumption for angle of attack.
             system_properties.calculate_aerodynamic_properties(alpha)
@@ -1080,12 +1080,12 @@ class TimeSeries:
         if markers_plotted:
             plt.legend()
 
-    def trajectory_plot3d(self, fig_num=None, animation=True, plot_kwargs={'linestyle': '-'}, gradient_color=None,
+    def trajectory_plot3d(self, ax=None, animation=True, plot_kwargs={'linestyle': '-'}, gradient_color=None,
                           plot_point_type=None):
         """Animation of the 3D trajectory of the kite.
 
         Args:
-            fig_num (int, optional): Number of figure used for the plot, if None a new figure is created.
+            ax (int, optional): Number of figure used for the plot, if None a new figure is created.
             animation (bool, optional): Make animation of the plot by changing the view angle.
             plot_kwargs (dict, optional): Line plot keyword arguments.
             plot_point_type (int, optional): If not None, only plot points for which the phase identifier corresponds to
@@ -1096,8 +1096,10 @@ class TimeSeries:
         from mpl_toolkits.mplot3d.art3d import Line3DCollection
         from matplotlib.colors import ListedColormap
         from itertools import cycle
-        fig = plt.figure(fig_num)
-        ax = fig.gca(projection='3d')
+
+        if ax is None:
+            fig = plt.figure()
+            ax = fig.gca(projection='3d')
 
         if plot_point_type is not None:
             point_types = getattr(self, 'phase_id', np.zeros(self.n_time_points))
@@ -2113,14 +2115,18 @@ class EvaluatePattern(Phase):  # Determine performance along cross wind pattern 
                 self.time.append(next_time)
 
         # if valid_pattern:
-        pattern_duration = self.time[-1]
+        self.duration = self.time[-1]
         # else:
         #     pattern_duration = 1e3
+        self.energy = np.trapz([ss.power_ground for ss in self.steady_states], self.time)
+        if self.duration > 0:
+            self.average_power = self.energy / self.duration
 
         if print_details:
-            print("Pattern duration [s]:", pattern_duration)
+            print("Pattern duration [s]:", self.duration)
             i_end = 0
             flying_down = 0.
+            # Way to complicated method to determine flying down time
             for i, chi in enumerate([90, -90, -90, 90]):
                 i_start = i_end
                 if i == 3:
@@ -2136,15 +2142,22 @@ class EvaluatePattern(Phase):  # Determine performance along cross wind pattern 
                 if i in [1, 3]:
                     flying_down += t - t_last
                 t_last = t
-            print("Flying down [%]:", flying_down/pattern_duration*100.)
-            print("Representative azimuth angle [deg]:", np.arccos(np.trapz(cos_phi, self.time)/pattern_duration)*180./np.pi)
-            print("Representative elevation angle [deg]:", np.arccos(np.trapz(cos_beta, self.time)/pattern_duration)*180./np.pi)
-            print("Representative course angle [deg]:", np.arccos(np.trapz(cos_chi, self.time)/pattern_duration)*180./np.pi)
+            print("Flying down [%]: {:.1f}".format(flying_down/self.duration*100.))
+            az_out = np.arccos(np.trapz(cos_phi, self.time)/self.duration)
+            print("Representative azimuth angle [deg]: {:.1f}".format(az_out*180./np.pi))
+            el_out = np.arccos(np.trapz(cos_beta, self.time)/self.duration)
+            print("Representative elevation angle [deg]: {:.1f}".format(el_out*180./np.pi))
+            chi_out = np.arccos(np.trapz(cos_chi, self.time)/self.duration)
+            print("Representative course angle [deg]: {:.1f}".format(chi_out*180./np.pi))
+            print("Time average course angle [deg]:  {:.1f}".format(
+                  np.trapz([kin.course_angle for kin in self.kinematics], self.time)/self.duration * 180./np.pi))
 
-        return pattern_duration
+            return az_out, el_out, chi_out
 
-    def plot_traces(self, x, plot_parameters, y_labels=None, y_scaling=None):
-        """Generic plotting method for making a plot of `KiteKinematics` and `SteadyState` attributes.
+        return self.duration
+
+    def plot_traces(self, plot_parameters, y_labels=None, y_scaling=None):
+        """General plotting method for making a plot of `KiteKinematics` and `SteadyState` attributes.
 
         Args:
             plot_parameters (tuple): Sequence of `KiteKinematics` or `SteadyState` attributes.
@@ -2155,7 +2168,7 @@ class EvaluatePattern(Phase):  # Determine performance along cross wind pattern 
         data_sources = (self.kinematics, self.steady_states)
         source_labels = ('kin', 'ss')
 
-        plot_traces(x[0], data_sources, source_labels, plot_parameters, y_labels, y_scaling, x_label=x[1])
+        plot_traces(self.time, data_sources, source_labels, plot_parameters, y_labels, y_scaling)
 
     def plot_pattern(self):
         plt.figure()
@@ -2163,6 +2176,7 @@ class EvaluatePattern(Phase):  # Determine performance along cross wind pattern 
                  [kin.elevation_angle*180./np.pi for kin in self.kinematics])
         kin = self.kinematics[5]
         plt.plot([kin.azimuth_angle*180./np.pi], [kin.elevation_angle*180./np.pi], 's')
+        plt.axis('equal')
 
 
 class Cycle(TimeSeries):
@@ -2340,10 +2354,10 @@ class Cycle(TimeSeries):
 
         if print_summary:
             print("Total cycle: {:.1f} seconds in which {:.0f}J energy produced.".format(self.time[-1], self.energy))
-            print("Mean cycle power: {:.1f}W".format(self.average_power))
-            print("Retraction power: {:.1f}W".format(retr.average_power))
-            print("Transition power: {:.1f}W".format(trans.average_power))
-            print("Traction power: {:.1f}W".format(trac.average_power))
+            print("Mean cycle power and duration: {:.1f}W & {:.1f}s".format(self.average_power, self.duration))
+            print("Retraction power and duration: {:.1f}W & {:.1f}s".format(retr.average_power, retr.duration))
+            print("Transition power and duration: {:.1f}W & {:.1f}s".format(trans.average_power, trans.duration))
+            print("Traction power and duration: {:.1f}W & {:.1f}s".format(trac.average_power, trac.duration))
 
         self.duty_cycle = trac.duration/self.duration
         try:
