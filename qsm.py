@@ -714,7 +714,7 @@ class SteadyState:
             if self.enable_steady_state_errors:
                 raise SteadyStateError(error_message, error_code)
 
-    def find_state(self, system_properties, environment_state, basic_kinematics, print_details=False):
+    def find_state(self, system_properties, environment_state, basic_kinematics, print_details=False, kappa_set=None):
         """Iterative procedure for finding the kinematic ratio yielding the steady state of the kite.
 
         Args:
@@ -815,7 +815,11 @@ class SteadyState:
             lift_to_drag = system_properties.lift_to_drag
 
             # Parameters used for loop condition.
-            kappa = lift_to_drag  # Initial assumption for kinematic ratio (massless solution).
+            if kappa_set is None:
+                kappa = lift_to_drag  # Initial assumption for kinematic ratio (massless solution).
+            else:
+                assert self.force_n_iterations == 1
+                kappa = kappa_set
             self.n_iterations = 0  # Counter for number of iterations.
 
             # Iterative procedure to determine true kinematic ratio.
@@ -973,6 +977,61 @@ class SteadyState:
                 self.tether_force_max_limit_violated = False
                 self.tether_force_min_limit_violated = True
                 # self.tether_force_limit_violation = min_force - self.tether_force_ground
+
+
+class DuoCycle:
+    def __init__(self, system_properties, environment_state):
+        self.system_properties = system_properties
+        self.environment_state = environment_state
+        self.phi_r = 0.2012354421510459
+        self.chi_r = 1.6249951922452899
+
+    def run_simulation(self, kappa_out, kappa_in, f_out=5000, f_in=500, elevation_angle_traction=30*np.pi/180., tether_length=250, relax_errors=True):
+        # Create objects containing the kite position and course angle for reel-out and reel-in.
+        kite_position_out = {
+            'straight_tether_length': tether_length,
+            'azimuth_angle': self.phi_r,  # [rad]
+            'elevation_angle': elevation_angle_traction,
+            'course_angle': self.chi_r,  # [rad]
+        }
+        kite_position_out = KiteKinematics(**kite_position_out)
+
+        self.system_properties.update(tether_length, True)
+        self.environment_state.calculate(kite_position_out.z)
+
+        iterative_procedure_config = {
+            'force_n_iterations': 1,
+            'enable_steady_state_errors': not relax_errors,
+        }
+        ss_out = SteadyState(iterative_procedure_config)
+        ss_out.control_settings = ('tether_force_ground', f_out)
+        ss_out.find_state(self.system_properties, self.environment_state, kite_position_out, kappa_set=kappa_out)
+        p_out = ss_out.power_ground
+        v_out = ss_out.reeling_speed
+
+        kite_position_in = {
+            'straight_tether_length': tether_length,
+            'azimuth_angle': 0.,  # [rad]
+            'elevation_angle': 50*np.pi/180.,  #elevation_angle_retraction,
+            'course_angle': 180. * np.pi / 180.,  # [rad]
+        }
+        kite_position_in = KiteKinematics(**kite_position_in)
+
+        self.system_properties.update(tether_length, False)
+        self.environment_state.calculate(kite_position_in.z)
+
+        # Determine steady state for reel-in.
+        ss_in = SteadyState(iterative_procedure_config)
+        ss_in.control_settings = ('tether_force_ground', f_in)
+        ss_in.find_state(self.system_properties, self.environment_state, kite_position_in, kappa_set=kappa_in)
+        p_in = ss_in.power_ground
+        v_in = -ss_in.reeling_speed
+
+        # Assuming that the reeling distance is the same for the reel-out and reel-in: the fraction of time spent per
+        # phase can be calculated from the reeling speeds.
+        mean_cycle_power = (p_out / v_out + p_in / v_in) * v_out * v_in / (v_out + v_in)
+
+        return mean_cycle_power, v_out, v_in, ss_out.lift_to_drag_error, ss_in.lift_to_drag_error, ss_in.elevation_rate
 
 
 class TimeSeries:
