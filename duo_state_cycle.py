@@ -3,7 +3,7 @@ from scipy import optimize as op
 import numpy as np
 import matplotlib.pyplot as plt
 
-from qsm import DuoCycle
+from qsm import DuoCycle, OptCycle
 
 
 class OptimizerError(Exception):
@@ -120,8 +120,8 @@ class Optimizer:
                 x_real_scale = self.x_opt_real_scale
             else:
                 x_real_scale = self.x0_real_scale
-        cons = self.eval_fun(x_real_scale, scale_x=False, relax_errors=relax_errors)[1]
-        return cons
+        res = self.eval_fun(x_real_scale, scale_x=False, relax_errors=relax_errors)
+        return res
 
     def eval_fun_pyopt(self, x, *args):
         """PyOpt's implementation of SLSQP can produce NaN's in the optimization vector or contain values that violate
@@ -248,7 +248,7 @@ class Optimizer:
         return self.x_opt_real_scale
 
 
-class OptimizerCycle(Optimizer):
+class OptimizerCycleDuo(Optimizer):
     """Tether force controlled cycle optimizer. Zero reeling speed is used as setpoint for transition phase."""
     OPT_VARIABLE_LABELS = [
         "kappa_out",
@@ -323,19 +323,111 @@ class OptimizerCycle(Optimizer):
         return obj, np.hstack([eq_cons, ineq_cons])
 
 
+class OptimizerCycle(Optimizer):
+    """Tether force controlled cycle optimizer. Zero reeling speed is used as setpoint for transition phase."""
+    N_POINTS_PER_PHASE = [5, 10]
+    OPT_VARIABLE_LABELS = [
+        "Duration reel-out [s]",
+        "Duration reel-in [s]",
+        "Reel-out\nelevation\nangle [rad]",
+        "Minimum tether length [m]",
+    ]
+    OPT_VARIABLE_LABELS = np.append(OPT_VARIABLE_LABELS, ["Reel-out\nforce {} [N]".format(i+1) for i in range(N_POINTS_PER_PHASE[0])] +
+                                    ["Reel-in\nforce {} [N]".format(i+1) for i in range(N_POINTS_PER_PHASE[1])])
+
+    X0_REAL_SCALE_DEFAULT = np.array([30, 20, 30*np.pi/180., 150])
+    X0_REAL_SCALE_DEFAULT = np.append(X0_REAL_SCALE_DEFAULT, np.hstack((np.ones(N_POINTS_PER_PHASE[0])*4000, np.ones(N_POINTS_PER_PHASE[1])*1500)))
+    SCALING_X_DEFAULT = np.array([1e-2, 1e-2, 1, 1e-3])
+    SCALING_X_DEFAULT = np.append(SCALING_X_DEFAULT, np.ones(np.sum(N_POINTS_PER_PHASE))*1e-4)
+    BOUNDS_REAL_SCALE_DEFAULT = np.array([
+        [1, 120],
+        [1, 60],
+        [25*np.pi/180, 60.*np.pi/180.],
+        [200, 250],
+    ])
+    BOUNDS_REAL_SCALE_DEFAULT = np.append(BOUNDS_REAL_SCALE_DEFAULT, np.empty((np.sum(N_POINTS_PER_PHASE), 2)) * np.nan, axis=0)
+    N_INEQ_CONS = np.sum(N_POINTS_PER_PHASE)*2
+    N_EQ_CONS = 1
+
+    def __init__(self, system_properties, environment_state):
+        # Initiate attributes of parent class.
+        bounds = self.BOUNDS_REAL_SCALE_DEFAULT.copy()
+        bounds[4:, :] = [system_properties.tether_force_min_limit, system_properties.tether_force_max_limit]
+        super().__init__(self.X0_REAL_SCALE_DEFAULT.copy(), bounds, self.SCALING_X_DEFAULT.copy(), self.N_INEQ_CONS,
+                         self.N_EQ_CONS, system_properties, environment_state)
+
+    def eval_fun(self, x, scale_x=True, relax_errors=True):
+        """Method calculating the objective and constraint functions from the eval_performance_indicators method output.
+        """
+        # Convert the optimization vector to real scale values and perform simulation.
+        if scale_x:
+            x_real_scale = x/self.scaling_x
+        else:
+            x_real_scale = x
+        cycle = OptCycle(self.system_properties, self.environment_state)
+        cycle.n_points_per_phase = self.N_POINTS_PER_PHASE
+        forces_out = x_real_scale[4:4+self.N_POINTS_PER_PHASE[0]]
+        forces_in = x_real_scale[4+self.N_POINTS_PER_PHASE[0]:4+np.sum(self.N_POINTS_PER_PHASE)]
+        cycle_res = cycle.run_simulation(*x_real_scale[:4], forces_out, forces_in, relax_errors=relax_errors)
+        if not relax_errors:
+            return cycle_res
+        mcp, v_out, v_in, tether_length_end = cycle_res[:4]
+
+        # Prepare the simulation by updating simulation parameters.
+        env_state = self.environment_state
+        env_state.calculate(100.)
+        power_wind_100m = .5 * env_state.air_density * env_state.wind_speed ** 3
+
+        # Determine optimization objective and constraints.
+        obj = -mcp/power_wind_100m/self.system_properties.kite_projected_area
+
+        eq_cons = np.array([tether_length_end-x_real_scale[3]])
+
+        # The maximum reel-out tether force can be exceeded when the tether force control is overruled by the maximum
+        # reel-out speed limit and the imposed reel-out speed yields a tether force exceeding its set point. This
+        # scenario is prevented by the lower constraint.
+        speed_min_limit = self.system_properties.reeling_speed_min_limit
+        speed_max_limit = self.system_properties.reeling_speed_max_limit
+
+        ineq_cons = []
+        for i in range(self.N_POINTS_PER_PHASE[0]):
+            speed_violation_traction = v_out[i] - speed_min_limit
+            ineq_cons.append(speed_violation_traction / speed_min_limit + 1e-6)
+            speed_violation_traction = v_out[i] - speed_max_limit
+            ineq_cons.append(-speed_violation_traction / speed_max_limit + 1e-6)
+        for i in range(self.N_POINTS_PER_PHASE[1]):
+            speed_violation_retraction = -v_in[i] - speed_min_limit
+            ineq_cons.append(speed_violation_retraction / speed_min_limit + 1e-6)
+            speed_violation_retraction = -v_in[i] - speed_max_limit
+            ineq_cons.append(-speed_violation_retraction / speed_max_limit + 1e-6)
+
+        return obj, np.hstack([eq_cons, np.array(ineq_cons)])
+
+
 def test():
     from qsm import LogProfile, TractionPhaseHybrid
     from kitepower_kites import sys_props_v3
 
     env_state = LogProfile()
-    env_state.set_reference_wind_speed(12.)
+    env_state.set_reference_wind_speed(10.)
 
     oc = OptimizerCycle(sys_props_v3, env_state)
     x_opt = oc.optimize()
     print(x_opt)
-    print(x_opt[4]*180./np.pi)
-    print(oc.eval_point(True))
-    # plt.show()
+    print(x_opt[2]*180./np.pi)
+    mcp, time_out, kite_positions_out, steady_states_out, time_in, kite_positions_in, steady_states_in = oc.eval_point(True) #, relax_errors=True))
+    print(mcp)
+    fig, ax = plt.subplots(2, 1)
+    ax[0].plot(time_out, [ss.tether_force_ground for ss in steady_states_out], '.-')
+    ax[0].plot(time_in, [ss.tether_force_ground for ss in steady_states_in], '.-')
+    ax[1].plot(time_out, [ss.reeling_speed for ss in steady_states_out], '.-')
+    ax[1].plot(time_in, [ss.reeling_speed for ss in steady_states_in], '.-')
+
+    plt.figure()
+    plt.plot([kp.x for kp in kite_positions_out], [kp.z for kp in kite_positions_out])
+    plt.plot([kp.x for kp in kite_positions_in], [kp.z for kp in kite_positions_in])
+
+    plt.show()
 
 
 if __name__ == "__main__":

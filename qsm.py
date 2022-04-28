@@ -1034,6 +1034,129 @@ class DuoCycle:
         return mean_cycle_power, v_out, v_in, ss_out.lift_to_drag_error, ss_in.lift_to_drag_error, ss_in.elevation_rate
 
 
+class OptCycle:
+    def __init__(self, system_properties, environment_state):
+        self.system_properties = system_properties
+        self.environment_state = environment_state
+        self.phi_r = 0.2012354421510459
+        self.chi_r = 1.6249951922452899
+        self.n_points_per_phase = [5, 10]
+
+    def run_simulation(self, duration_out, duration_in, elevation_angle_traction=30*np.pi/180., min_tether_length=250, forces_out=5000., forces_in=2000., kappas_out=None, kappas_in=None, relax_errors=True):
+        # Create objects containing the kite position and course angle for reel-out and reel-in.
+        if isinstance(forces_out, float):
+            forces_out = [forces_out]*self.n_points_per_phase[0]
+        if isinstance(forces_in, float):
+            forces_in = [forces_in]*self.n_points_per_phase[1]
+
+        iterative_procedure_config = {
+            'enable_steady_state_errors': not relax_errors,
+        }
+        if kappas_out is not None:
+            iterative_procedure_config['force_n_iterations'] = 1
+        kite_position = {
+            'straight_tether_length': 0,
+            'azimuth_angle': self.phi_r,  # [rad]
+            'elevation_angle': elevation_angle_traction,
+            'course_angle': self.chi_r,  # [rad]
+        }
+
+        dt_out = duration_out/(self.n_points_per_phase[0]-1)
+        tether_lengths_out = []
+        speeds_out, powers_out, lift_to_drag_errors_out = [], [], []
+        steady_states_out, kite_positions_out = [], []
+
+        for i, f in enumerate(forces_out):
+            if i == 0:
+                l = min_tether_length
+            else:
+                d_tether_length = ss_out.reeling_speed * dt_out
+                l += d_tether_length
+
+            kite_position['straight_tether_length'] = l
+            kp = KiteKinematics(**kite_position)
+
+            tether_lengths_out.append(l)
+            kite_positions_out.append(kp)
+
+            self.system_properties.update(l, True)
+            self.environment_state.calculate(kp.z)
+
+            ss_out = SteadyState(iterative_procedure_config)
+            ss_out.control_settings = ('tether_force_ground', f)
+            if kappas_out is not None:
+                k = kappas_out[i]
+            else:
+                k = None
+            ss_out.find_state(self.system_properties, self.environment_state, kp, kappa_set=k)
+            steady_states_out.append(ss_out)
+
+            speeds_out.append(ss_out.reeling_speed)
+            powers_out.append(ss_out.power_ground)
+            lift_to_drag_errors_out.append(ss_out.lift_to_drag_error)
+
+        time_out = np.linspace(0, duration_out, self.n_points_per_phase[0])
+        mean_power_out = np.mean(powers_out)
+
+        kite_position = {
+            'straight_tether_length': 0,
+            'azimuth_angle': 0.,  # [rad]
+            'elevation_angle': 0.,
+            'course_angle': np.pi,  # [rad]
+        }
+
+        dt_in = duration_in/(self.n_points_per_phase[1]-1)
+
+        speeds_in, powers_in, lift_to_drag_errors_in = [], [], []
+        tether_lengths_in, elevations_in = [], []
+        steady_states_in, kite_positions_in = [], []
+
+        for i, f in enumerate(forces_in):
+            if i == 0:
+                beta = elevation_angle_traction
+            else:
+                d_tether_length = ss_in.reeling_speed * dt_in
+                l += d_tether_length
+                d_elevation = ss_in.elevation_rate * dt_in
+                beta += d_elevation
+            kite_position['straight_tether_length'] = l
+            kite_position['elevation_angle'] = beta
+            kp = KiteKinematics(**kite_position)
+
+            tether_lengths_in.append(l)
+            elevations_in.append(beta)
+            kite_positions_in.append(kp)
+
+            self.system_properties.update(l, False)
+            self.environment_state.calculate(kp.z)
+
+            # Determine steady state for reel-in.
+            ss_in = SteadyState(iterative_procedure_config)
+            ss_in.control_settings = ('tether_force_ground', f)
+            if kappas_in is not None:
+                k = kappas_in[i]
+            else:
+                k = None
+            ss_in.find_state(self.system_properties, self.environment_state, kp, kappa_set=k)
+            steady_states_in.append(ss_in)
+
+            speeds_in.append(ss_in.reeling_speed)
+            powers_in.append(ss_in.power_ground)
+            lift_to_drag_errors_in.append(ss_in.lift_to_drag_error)
+
+        # Note different integration technique used than trapz for reel-out
+        # t = np.insert(np.cumsum(np.diff(tether_lengths_in) / np.array(speeds_in[:-1])), 0, 0)
+        time_in = np.linspace(0, duration_in, self.n_points_per_phase[1]) + duration_out
+        mean_power_in = np.mean(powers_in)
+
+        mean_cycle_power = (mean_power_out*duration_out + mean_power_in*duration_in)/(duration_out + duration_in)
+
+        if not relax_errors:
+            return mean_cycle_power, time_out, kite_positions_out, steady_states_out, time_in, kite_positions_in, steady_states_in
+        else:
+            return mean_cycle_power, speeds_out, speeds_in, tether_lengths_in[-1], lift_to_drag_errors_out, lift_to_drag_errors_in
+
+
 class TimeSeries:
     """A solution to the quasi-steady motion simulation of the kite. The distance covered by the point particle is
     solved as a transition through steady states using the finite difference method.
@@ -2462,6 +2585,12 @@ if __name__ == "__main__":
         'tether_force_min_limit': 1200,
     }
     sys_props = SystemProperties(sys_props)
+
+    cycle = OptCycle(sys_props, env_state)
+    n_points = 5
+    print(cycle.run_simulation(None, 20))
+
+    exit()
 
     # Create pumping cycle simulation object, run simulation, and plot results.
     settings = {

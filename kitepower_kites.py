@@ -39,7 +39,7 @@ sys_props_v3 = {
     'tether_density': 724.,  # [kg/m^3] - 0.85 GPa
     'tether_diameter': 0.004,  # [m]
     'tether_force_max_limit': 5000,  # ~ max_wing_loading*projected_area [N]
-    'tether_force_min_limit': 300,  # ~ min_wing_loading * projected_area [N]
+    'tether_force_min_limit': 1000,  # ~ min_wing_loading * projected_area [N]
     'kite_lift_coefficient_powered': .9,  # [-] - in the range of .9 - 1.0
     'kite_drag_coefficient_powered': .2,  # [-]
     'kite_lift_coefficient_depowered': .2,  # [-]
