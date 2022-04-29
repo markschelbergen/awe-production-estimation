@@ -843,6 +843,7 @@ class SteadyState:
                 # Updating tangential velocity factor.
                 try:
                     lambda_ = a + np.sqrt(a**2+b**2-1+kappa**2*(b-rf)**2)
+                    # kappa = ((lambda_**2 - 2*a**2+b**2-1)/(b-rf)**2)**.5
                 except (ValueError, FloatingPointError):
                     error_message = "No feasible solution found for tangential velocity factor " \
                                     "after {} iterations.".format(self.n_iterations)
@@ -978,6 +979,109 @@ class SteadyState:
                 self.tether_force_min_limit_violated = True
                 # self.tether_force_limit_violation = min_force - self.tether_force_ground
 
+    def find_state_opt(self, kappa, system_properties, environment_state, basic_kinematics, relax_errors=True):
+        """Iterative procedure for finding the kinematic ratio yielding the steady state of the kite.
+
+        Args:
+            kappa
+            system_properties (`SysPropsFixedAeroCoeffs` or child): Collection of system properties.
+            environment_state (`Environment` or child): Specification of environment.
+            basic_kinematics (`KiteKinematics`): Basic kinematic properties required for finding the steady state.
+
+        """
+        # System description.
+        s = system_properties.kite_projected_area
+        m = system_properties.kite_mass
+        m_tether = system_properties.tether_mass
+
+        # Position of point particle in wind reference frame.
+        # Vectors are expressed in the kite reference frame with axes e_r, e_theta, and e_phi.
+        phi = basic_kinematics.azimuth_angle - environment_state.downwind_direction  # Convert from ground reference frame to
+        # wind reference frame.
+        theta = np.pi / 2 - basic_kinematics.elevation_angle
+        chi = basic_kinematics.course_angle
+        r = basic_kinematics.straight_tether_length
+
+        # Environmental state.
+        v_wind = environment_state.wind_speed
+        rho = environment_state.air_density
+        g = environment_state.GRAVITATIONAL_ACCELERATION
+
+        q = .5*rho*v_wind**2
+        g_vector = np.array([-np.cos(theta)*g, np.sin(theta)*g, 0])
+
+        a = np.cos(theta) * np.cos(phi) * np.cos(chi) - np.sin(phi) * np.sin(chi)
+        b = np.sin(theta) * np.cos(phi)
+
+        f_tether_ground = self.control_settings[1]  # Force controlled at ground.
+        f_tether_theta = .5 * np.sin(theta) * m_tether * g
+        f_tether_r_ground = np.sqrt(f_tether_ground**2 - f_tether_theta**2)
+        f_tether_r = -(f_tether_r_ground + np.cos(theta) * m_tether * g)
+        f_tether_vector = np.array([f_tether_r, f_tether_theta, 0])
+
+        f_aero_vector = -f_tether_vector - m * g_vector
+        f_aero = np.linalg.norm(f_aero_vector)
+
+        # Aerodynamics of kite.
+        c_r = system_properties.aerodynamic_force_coefficient
+        lift_to_drag = system_properties.lift_to_drag
+
+        rf = np.sin(theta) * np.cos(phi) - np.sqrt(f_aero / (q*s*c_r*(1+kappa**2)))
+
+        # Updating tangential velocity factor.
+        try:
+            lambda_ = a + np.sqrt(a**2+b**2-1+kappa**2*(b-rf)**2)
+        except FloatingPointError as err:
+            if relax_errors:
+                # Trick the optimizer by returning a negative value
+                lambda_ = a**2+b**2-1+kappa**2*(b-rf)**2
+            else:
+                raise err
+
+        # Updating the apparent wind speed.
+        v_app = (np.sin(theta) * np.cos(phi) - rf) * np.sqrt(1 + kappa ** 2) * v_wind
+        v_app_vector = np.array([
+            (np.sin(theta) * np.cos(phi) - rf) * v_wind,
+            (np.cos(theta) * np.cos(phi) - lambda_ * np.cos(chi)) * v_wind,
+            (-np.sin(phi) - lambda_ * np.sin(chi)) * v_wind,
+        ])
+
+        # Evaluate the convergence of the calculated to the actual lift-to-drag ratio.
+        drag = np.dot(f_aero_vector, v_app_vector)/v_app
+        lift_to_drag_calc = np.sqrt((f_aero/drag)**2-1)
+
+        self.lift_to_drag_error = lift_to_drag-lift_to_drag_calc
+
+        # Forces from the free body diagram of tether, note that the tether forces as experienced by the kite switch
+        # sign.
+        f_tether_vector = f_aero_vector + m*g_vector
+        f_tether = np.linalg.norm(f_tether_vector)
+
+        f_tether_r_ground = -(f_tether_vector[0] - np.cos(theta)*m_tether*g)
+        f_tether_ground = np.sqrt(f_tether_r_ground**2 + f_tether_vector[1]**2)
+
+        # Calculating mechanical power of system.
+        reeling_speed = v_wind*rf
+        p = f_tether_ground*reeling_speed
+
+        self.reeling_factor = rf
+        self.kinematic_ratio = kappa
+        self.tangential_speed_factor = lambda_
+        self.kite_tangential_speed = lambda_ * v_wind
+        self.wind_speed = v_wind
+        self.apparent_wind_speed = v_app
+        self.heading = np.arctan2(v_app_vector[2], v_app_vector[1])
+        self.aerodynamic_force = f_aero
+        self.tether_force_kite = f_tether
+        self.tether_force_ground = f_tether_ground
+        self.power_ground = p
+
+        # Kite velocity in spherical coordinates, see eq. 2.58-2.60 AWE book.
+        self.kite_speed = np.sqrt(reeling_speed**2 + (lambda_*v_wind)**2)
+        self.reeling_speed = reeling_speed
+        self.elevation_rate = - v_wind * lambda_ / r * np.cos(chi)
+        self.azimuth_rate = v_wind * lambda_ / r * np.sin(chi) / np.sin(theta)
+
 
 class DuoCycle:
     def __init__(self, system_properties, environment_state):
@@ -1042,18 +1146,15 @@ class OptCycle:
         self.chi_r = 1.6249951922452899
         self.n_points_per_phase = [5, 10]
 
-    def run_simulation(self, duration_out, duration_in, elevation_angle_traction=30*np.pi/180., min_tether_length=250, forces_out=5000., forces_in=2000., kappas_out=None, kappas_in=None, relax_errors=True):
+    def run_simulation(self, duration_out, duration_in, elevation_angle_traction=30*np.pi/180., min_tether_length=250, forces_out=5000., forces_in=2000., kappas_out=None, kappas_in=None, relax_errors=True, dead_time=17, wind_speed=None):  #dead_time=17
+        if wind_speed is not None:
+            self.environment_state.set_reference_wind_speed(wind_speed)
         # Create objects containing the kite position and course angle for reel-out and reel-in.
         if isinstance(forces_out, float):
             forces_out = [forces_out]*self.n_points_per_phase[0]
         if isinstance(forces_in, float):
             forces_in = [forces_in]*self.n_points_per_phase[1]
 
-        iterative_procedure_config = {
-            'enable_steady_state_errors': not relax_errors,
-        }
-        if kappas_out is not None:
-            iterative_procedure_config['force_n_iterations'] = 1
         kite_position = {
             'straight_tether_length': 0,
             'azimuth_angle': self.phi_r,  # [rad]
@@ -1063,7 +1164,7 @@ class OptCycle:
 
         dt_out = duration_out/(self.n_points_per_phase[0]-1)
         tether_lengths_out = []
-        speeds_out, powers_out, lift_to_drag_errors_out = [], [], []
+        speeds_out, powers_out, lift_to_drag_errors_out, tangential_speed_factors_out = [], [], [], []
         steady_states_out, kite_positions_out = [], []
 
         for i, f in enumerate(forces_out):
@@ -1082,18 +1183,20 @@ class OptCycle:
             self.system_properties.update(l, True)
             self.environment_state.calculate(kp.z)
 
-            ss_out = SteadyState(iterative_procedure_config)
+            ss_out = SteadyState()
             ss_out.control_settings = ('tether_force_ground', f)
             if kappas_out is not None:
                 k = kappas_out[i]
             else:
                 k = None
-            ss_out.find_state(self.system_properties, self.environment_state, kp, kappa_set=k)
+            ss_out.find_state_opt(k, self.system_properties, self.environment_state, kp, relax_errors)
+            # print("speed out", ss_out.reeling_speed)
             steady_states_out.append(ss_out)
 
             speeds_out.append(ss_out.reeling_speed)
             powers_out.append(ss_out.power_ground)
             lift_to_drag_errors_out.append(ss_out.lift_to_drag_error)
+            tangential_speed_factors_out.append(ss_out.tangential_speed_factor)
 
         time_out = np.linspace(0, duration_out, self.n_points_per_phase[0])
         mean_power_out = np.mean(powers_out)
@@ -1107,7 +1210,7 @@ class OptCycle:
 
         dt_in = duration_in/(self.n_points_per_phase[1]-1)
 
-        speeds_in, powers_in, lift_to_drag_errors_in = [], [], []
+        speeds_in, powers_in, lift_to_drag_errors_in, tangential_speed_factors_in = [], [], [], []
         tether_lengths_in, elevations_in = [], []
         steady_states_in, kite_positions_in = [], []
 
@@ -1131,30 +1234,33 @@ class OptCycle:
             self.environment_state.calculate(kp.z)
 
             # Determine steady state for reel-in.
-            ss_in = SteadyState(iterative_procedure_config)
+            ss_in = SteadyState()
             ss_in.control_settings = ('tether_force_ground', f)
             if kappas_in is not None:
                 k = kappas_in[i]
             else:
                 k = None
-            ss_in.find_state(self.system_properties, self.environment_state, kp, kappa_set=k)
+            ss_in.find_state_opt(k, self.system_properties, self.environment_state, kp, relax_errors)
+            # print("speed in", ss_in.reeling_speed)
             steady_states_in.append(ss_in)
 
             speeds_in.append(ss_in.reeling_speed)
             powers_in.append(ss_in.power_ground)
             lift_to_drag_errors_in.append(ss_in.lift_to_drag_error)
+            tangential_speed_factors_in.append(ss_in.tangential_speed_factor)
 
         # Note different integration technique used than trapz for reel-out
         # t = np.insert(np.cumsum(np.diff(tether_lengths_in) / np.array(speeds_in[:-1])), 0, 0)
         time_in = np.linspace(0, duration_in, self.n_points_per_phase[1]) + duration_out
         mean_power_in = np.mean(powers_in)
 
-        mean_cycle_power = (mean_power_out*duration_out + mean_power_in*duration_in)/(duration_out + duration_in)
+        mean_cycle_power = (mean_power_out*duration_out + mean_power_in*duration_in)/(duration_out + duration_in +
+                                                                                      dead_time)
 
         if not relax_errors:
             return mean_cycle_power, time_out, kite_positions_out, steady_states_out, time_in, kite_positions_in, steady_states_in
         else:
-            return mean_cycle_power, speeds_out, speeds_in, tether_lengths_in[-1], lift_to_drag_errors_out, lift_to_drag_errors_in
+            return mean_cycle_power, speeds_out, speeds_in, tether_lengths_in[-1], lift_to_drag_errors_out, lift_to_drag_errors_in, tangential_speed_factors_out, tangential_speed_factors_in
 
 
 class TimeSeries:
@@ -2077,7 +2183,7 @@ class LissajousPattern:
         # Lissajous curve properties for figure 8.
         self.elevation_max = 4 * np.pi / 180  # [rad] sets max (relative) elevation angle: positive value -> flying up
         # at edges
-        self.azimuth_max = 20 * np.pi / 180  # [rad] sets max azimuth angle
+        self.azimuth_max = 18.5 * np.pi / 180  # [rad] sets max azimuth angle
 
         # Calculated property.
         self.curve_length_unit_sphere = self.calc_curve_length_unit_sphere()
@@ -2566,6 +2672,10 @@ class Cycle(TimeSeries):
 
 
 if __name__ == "__main__":
+    liss = LissajousPattern()
+    print(liss.calc_curve_length_unit_sphere())
+    exit()
+
     # Expected performance summary:
     #   Total cycle: 87.4 seconds in which 51903J energy produced.
     #   Mean cycle power: 593.7W
