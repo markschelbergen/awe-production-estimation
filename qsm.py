@@ -167,10 +167,10 @@ class LogProfile(EnvAtmosphericPressure):
             height (float): Height above ground [m].
 
         """
-        if height < 0.:
-            raise OperationalLimitViolation("Invalid height is given: {:.1f}.".format(height))
-        elif height == 0.:
-            self.wind_speed = 0.
+        if height <= 0.:
+        #     raise OperationalLimitViolation("Invalid height is given: {:.1f}.".format(height))
+        # elif height == 0.:
+            self.wind_speed = 1e-6
         else:
             self.wind_speed = self.wind_speed_ref * np.log(height / self.h_0) / np.log(self.h_ref / self.h_0)
         return self.wind_speed
@@ -220,7 +220,8 @@ class NormalisedWindTable1D(EnvAtmosphericPressure):
         v = np.interp(height, self.heights, self.normalised_wind_speeds,
                       left=np.nan, right=np.nan) * self.wind_speed_ref
         if height <= 0. or np.isnan(v):
-            raise OperationalLimitViolation("Invalid height is given: {:.1f}.".format(height))
+            # raise OperationalLimitViolation("Invalid height is given: {:.1f}.".format(height))
+            v = 1e-6
         self.wind_speed = v
         return v
 
@@ -1164,7 +1165,7 @@ class OptCycle:
 
         dt_out = duration_out/(self.n_points_per_phase[0]-1)
         tether_lengths_out = []
-        speeds_out, powers_out, lift_to_drag_errors_out, tangential_speed_factors_out = [], [], [], []
+        speeds_out, powers_out, lift_to_drag_errors_out, tangential_speeds_out = [], [], [], []
         steady_states_out, kite_positions_out = [], []
 
         for i, f in enumerate(forces_out):
@@ -1196,7 +1197,7 @@ class OptCycle:
             speeds_out.append(ss_out.reeling_speed)
             powers_out.append(ss_out.power_ground)
             lift_to_drag_errors_out.append(ss_out.lift_to_drag_error)
-            tangential_speed_factors_out.append(ss_out.tangential_speed_factor)
+            tangential_speeds_out.append(ss_out.kite_tangential_speed)
 
         time_out = np.linspace(0, duration_out, self.n_points_per_phase[0])
         mean_power_out = np.mean(powers_out)
@@ -1256,11 +1257,27 @@ class OptCycle:
 
         mean_cycle_power = (mean_power_out*duration_out + mean_power_in*duration_in)/(duration_out + duration_in +
                                                                                       dead_time)
-
-        if not relax_errors:
-            return mean_cycle_power, time_out, kite_positions_out, steady_states_out, time_in, kite_positions_in, steady_states_in
-        else:
-            return mean_cycle_power, speeds_out, speeds_in, tether_lengths_in[-1], lift_to_drag_errors_out, lift_to_drag_errors_in, tangential_speed_factors_out, tangential_speed_factors_in
+        res = {
+            'mean_cycle_power': mean_cycle_power,
+            'tether_length_end': tether_lengths_in[-1],
+            'out': {
+                'time': time_out,
+                'kite_positions': kite_positions_out,
+                'steady_states': steady_states_out,
+                'reeling_speeds': speeds_out,
+                'tangential_speeds': tangential_speeds_out,
+                'lift_to_drag_errors': lift_to_drag_errors_out,
+            },
+            'in': {
+                'time': time_in,
+                'kite_positions': kite_positions_in,
+                'steady_states': steady_states_in,
+                'reeling_speeds': speeds_in,
+                'tangential_speed_factors': tangential_speed_factors_in,
+                'lift_to_drag_errors': lift_to_drag_errors_in,
+            },
+        }
+        return res
 
 
 class TimeSeries:
