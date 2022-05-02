@@ -920,8 +920,8 @@ class SteadyState:
             else:
                 break
 
-        if lambda_ < 0.:
-            self.process_error("Solution converged to an unrealistic lambda.", 8, print_details)
+        if lambda_ < -1e-6:
+            self.process_error("Solution converged to an unrealistic lambda of {:.3f}.".format(lambda_), 8, print_details)
 
         if print_details and self.error_message is None:
             print("Calculated lift-to-drag matches its expected value after {} iterations".format(self.n_iterations))
@@ -1184,13 +1184,12 @@ class OptCycle:
             self.system_properties.update(l, True)
             self.environment_state.calculate(kp.z)
 
-            ss_out = SteadyState()
+            ss_out = SteadyState({'enable_steady_state_errors': not relax_errors})
             ss_out.control_settings = ('tether_force_ground', f)
             if kappas_out is not None:
-                k = kappas_out[i]
+                ss_out.find_state_opt(kappas_out[i], self.system_properties, self.environment_state, kp, relax_errors)
             else:
-                k = None
-            ss_out.find_state_opt(k, self.system_properties, self.environment_state, kp, relax_errors)
+                ss_out.find_state(self.system_properties, self.environment_state, kp)
             # print("speed out", ss_out.reeling_speed)
             steady_states_out.append(ss_out)
 
@@ -1235,13 +1234,12 @@ class OptCycle:
             self.environment_state.calculate(kp.z)
 
             # Determine steady state for reel-in.
-            ss_in = SteadyState()
+            ss_in = SteadyState({'enable_steady_state_errors': not relax_errors})
             ss_in.control_settings = ('tether_force_ground', f)
             if kappas_in is not None:
-                k = kappas_in[i]
+                ss_in.find_state_opt(kappas_in[i], self.system_properties, self.environment_state, kp, relax_errors)
             else:
-                k = None
-            ss_in.find_state_opt(k, self.system_properties, self.environment_state, kp, relax_errors)
+                ss_in.find_state(self.system_properties, self.environment_state, kp)
             # print("speed in", ss_in.reeling_speed)
             steady_states_in.append(ss_in)
 
