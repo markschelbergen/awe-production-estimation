@@ -175,14 +175,14 @@ class LogProfile(EnvAtmosphericPressure):
             self.wind_speed = self.wind_speed_ref * np.log(height / self.h_0) / np.log(self.h_ref / self.h_0)
         return self.wind_speed
 
-    def plot_wind_profile(self):
+    def plot_wind_profile(self, ax):
         """Plot the wind speed versus the height above ground."""
-        heights = [50., 75., 100., 150., 200., 300., 400., 500.]
+        heights = [10., 20., 40., 60., 80., 100., 120., 140., 150., 160., 180., 200., 220., 250., 300., 500., 600.]
         wind_speeds = [self.calculate_wind(h) for h in heights]
-        plt.plot(wind_speeds, heights)
-        plt.xlabel('Wind speed [m/s]')
-        plt.ylabel('Height [m]')
-        plt.grid(True)
+        ax.plot(wind_speeds, heights)
+        ax.set_xlabel('Wind speed [m/s]')
+        ax.set_ylabel('Height [m]')
+        ax.grid(True)
 
 
 class NormalisedWindTable1D(EnvAtmosphericPressure):
@@ -225,13 +225,13 @@ class NormalisedWindTable1D(EnvAtmosphericPressure):
         self.wind_speed = v
         return v
 
-    def plot_wind_profile(self, label=None):
+    def plot_wind_profile(self, ax, label=None):
         """Plot the wind speed versus the height above ground."""
         wind_speeds = np.array(self.normalised_wind_speeds) * self.wind_speed_ref
-        plt.plot(wind_speeds, self.heights, label=label)
-        plt.xlabel('Wind speed [m s$^{-1}$]')
-        plt.ylabel('Height [m]')
-        plt.grid(True)
+        ax.plot(wind_speeds, self.heights, label=label)
+        ax.set_xlabel('Wind speed [m s$^{-1}$]')
+        ax.set_ylabel('Height [m]')
+        ax.grid(True)
 
 
 class WindTable2D(EnvAtmosphericPressure):
