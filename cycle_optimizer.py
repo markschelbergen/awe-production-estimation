@@ -409,14 +409,17 @@ class OptimizerCycleCutKappa(Optimizer):
     N_INEQ_CONS = 1 + np.sum(N_POINTS_PER_PHASE)*3 + N_POINTS_PER_PHASE[1]
     N_EQ_CONS = 1 + np.sum(N_POINTS_PER_PHASE)
 
-    def __init__(self, system_properties, environment_state, cut='out', obj_mcp_factor=0):
+    def __init__(self, system_properties, environment_state, cut='out', obj_factors=[1, 0], force_wind_speed=False):
         # Initiate attributes of parent class.
         bounds = self.BOUNDS_REAL_SCALE_DEFAULT.copy()
         bounds[4:4+np.sum(self.N_POINTS_PER_PHASE), :] = [system_properties.tether_force_min_limit, system_properties.tether_force_max_limit]
         super().__init__(self.X0_REAL_SCALE_DEFAULT.copy(), bounds, self.SCALING_X_DEFAULT.copy(), self.N_INEQ_CONS,
                          self.N_EQ_CONS, system_properties, environment_state)
         self.cut = cut
-        self.obj_mcp_factor = obj_mcp_factor
+        self.obj_factors = obj_factors
+        self.force_wind_speed = force_wind_speed
+        if force_wind_speed:
+            self.N_EQ_CONS += 1
 
     def eval_fun(self, x, scale_x=True, relax_errors=True):
         """Method calculating the objective and constraint functions from the eval_performance_indicators method output.
@@ -447,10 +450,12 @@ class OptimizerCycleCutKappa(Optimizer):
             sign = 1
         else:
             sign = -1
-        obj = sign * wind_speed*1e-2 - self.obj_mcp_factor*cycle_res['mean_cycle_power']*1e-5
+        obj = sign * self.obj_factors[0] * wind_speed*1e-2 - self.obj_factors[1] * cycle_res['mean_cycle_power']*1e-5
 
-        eq_cons = np.hstack([[cycle_res['tether_length_end']-tether_length_end],
+        eq_cons = np.hstack([[cycle_res['tether_length_end'] - tether_length_end],
                              cycle_res['out']['lift_to_drag_errors'], cycle_res['in']['lift_to_drag_errors']])
+        if self.force_wind_speed:
+            eq_cons = np.hstack([[wind_speed-self.force_wind_speed], eq_cons])
 
         # The maximum reel-out tether force can be exceeded when the tether force control is overruled by the maximum
         # reel-out speed limit and the imposed reel-out speed yields a tether force exceeding its set point. This
@@ -525,7 +530,7 @@ def eval_limit(wind_speeds=[22, 22.5, 22.7, 22.9], cut=None, env_state=LogProfil
         factors = []
     for f in factors:
         i += 1
-        oc = OptimizerCycleCutKappa(sys_props_v3, env_state, cut, f)
+        oc = OptimizerCycleCutKappa(sys_props_v3, env_state, cut, [1, f])
         oc.x0_real_scale = np.hstack([x_opt, v])
         x_opt_cut = oc.optimize(maxiter=100)
 
@@ -665,7 +670,18 @@ def construct_power_curve(starting_wind_speed=9., wind_speed_step=[.2, .5], powe
             oc.optimize(maxiter=300)
         else:
             oc.x0_real_scale = x0_next
-            oc.optimize(maxiter=maxiter)
+            try:
+                oc.optimize(maxiter=maxiter)
+            except FloatingPointError:
+                if v < power_optimization_limits[0]:
+                    break
+                else:
+                    opt_vars = np.vstack((opt_vars, [np.nan] * 4))
+                    mcps_low.append(np.nan)
+                    success_low.append(False)
+                    wind_speeds_low.append(v)
+                    v -= wind_speed_step[0]
+                    continue
 
         if oc.op_res['success']:  # or oc.op_res.get('exit_mode', -1) == 9:
             x0_next = oc.x_opt_real_scale
@@ -697,13 +713,14 @@ def construct_power_curve(starting_wind_speed=9., wind_speed_step=[.2, .5], powe
 
         if oc.op_res['success']:
             if success_counter == 0:
-                plot_sol(cycle_res, success_counter, ax, ax_traj, '-s')
-                ax_pc.plot(v, cycle_res['mean_cycle_power'], 's', color='C{}'.format(success_counter), mfc='None')
-                for a, x in zip(ax_vars, oc.x_opt_real_scale[:4]*np.array([1, 1, 180./np.pi, 1])): a.plot(v, x, 's', color='C{}'.format(success_counter), mfc='None')
+                plot_sol(cycle_res, 0, ax, ax_traj, '-s')
+                ax_pc.plot(v, cycle_res['mean_cycle_power'], 's', color='C0', mfc='None')
+                for a, x in zip(ax_vars, oc.x_opt_real_scale[:4]*np.array([1, 1, 180./np.pi, 1])): a.plot(v, x, 's', color='C0', mfc='None')
             elif success_counter % plot_nth_step == 0 or v < 6.:
-                plot_sol(cycle_res, success_counter, ax, ax_traj)
-                ax_pc.plot(v, cycle_res['mean_cycle_power'], 's', color='C{}'.format(success_counter), mfc='None')
-                for a, x in zip(ax_vars, oc.x_opt_real_scale[:4]*np.array([1, 1, 180./np.pi, 1])): a.plot(v, x, 's', color='C{}'.format(success_counter), mfc='None')
+                i_clr = success_counter//plot_nth_step
+                plot_sol(cycle_res, i_clr, ax, ax_traj)
+                ax_pc.plot(v, cycle_res['mean_cycle_power'], 's', color='C{}'.format(i_clr), mfc='None')
+                for a, x in zip(ax_vars, oc.x_opt_real_scale[:4]*np.array([1, 1, 180./np.pi, 1])): a.plot(v, x, 's', color='C{}'.format(i_clr), mfc='None')
             success_counter += 1
 
         if not oc.op_res['success'] and v < power_optimization_limits[0]:
@@ -727,9 +744,10 @@ def construct_power_curve(starting_wind_speed=9., wind_speed_step=[.2, .5], powe
         env_state.set_reference_wind_speed(x_opt[-1])
         cycle_res = oc.eval_point()
         print("Mean cycle power = {:.2f}".format(cycle_res['mean_cycle_power']))
-        plot_sol(cycle_res, success_counter, ax, ax_traj, ls='--.')
-        ax_pc.plot(x_opt[-1], cycle_res['mean_cycle_power'], 's', color='C{}'.format(success_counter), mfc='None')
-        for a, x in zip(ax_vars, x_opt[:4]*np.array([1, 1, 180./np.pi, 1])): a.plot(x_opt[-1], x, 's', color='C{}'.format(success_counter), mfc='None')
+        i_clr = success_counter // plot_nth_step
+        plot_sol(cycle_res, i_clr, ax, ax_traj, ls='--.')
+        ax_pc.plot(x_opt[-1], cycle_res['mean_cycle_power'], 's', color='C{}'.format(i_clr), mfc='None')
+        for a, x in zip(ax_vars, x_opt[:4]*np.array([1, 1, 180./np.pi, 1])): a.plot(x_opt[-1], x, 's', color='C{}'.format(i_clr), mfc='None')
         success_counter += 1
 
         opt_vars = np.vstack((opt_vars, [oc.x_opt_real_scale[:4]]))
@@ -782,9 +800,10 @@ def construct_power_curve(starting_wind_speed=9., wind_speed_step=[.2, .5], powe
 
         if oc.op_res['success']:
             if success_counter % plot_nth_step == 0:
-                plot_sol(cycle_res, success_counter, ax, ax_traj)
-                ax_pc.plot(v, cycle_res['mean_cycle_power'], 's', color='C{}'.format(success_counter), mfc='None')
-                for a, x in zip(ax_vars, oc.x_opt_real_scale[:4]*np.array([1, 1, 180./np.pi, 1])): a.plot(v, x, 's', color='C{}'.format(success_counter), mfc='None')
+                i_clr = success_counter // plot_nth_step
+                plot_sol(cycle_res, i_clr, ax, ax_traj)
+                ax_pc.plot(v, cycle_res['mean_cycle_power'], 's', color='C{}'.format(i_clr), mfc='None')
+                for a, x in zip(ax_vars, oc.x_opt_real_scale[:4]*np.array([1, 1, 180./np.pi, 1])): a.plot(v, x, 's', color='C{}'.format(i_clr), mfc='None')
             success_counter += 1
 
         if not oc.op_res['success'] and v > power_optimization_limits[1]:
@@ -794,7 +813,7 @@ def construct_power_curve(starting_wind_speed=9., wind_speed_step=[.2, .5], powe
     if cut:
         # Cut-out
         for f in [.5, .1, 0]:
-            oc = OptimizerCycleCutKappa(sys_props_v3, env_state, 'out', f)
+            oc = OptimizerCycleCutKappa(sys_props_v3, env_state, 'out', [1, f])
             oc.x0_real_scale = np.hstack([x0_next, v0_cut_out])
             oc.optimize(maxiter=maxiter)
 
@@ -809,9 +828,10 @@ def construct_power_curve(starting_wind_speed=9., wind_speed_step=[.2, .5], powe
             env_state.set_reference_wind_speed(oc.x_opt_real_scale[-1])
             cycle_res = oc.eval_point()
             print("Mean cycle power = {:.2f}".format(cycle_res['mean_cycle_power']))
-            plot_sol(cycle_res, success_counter, ax, ax_traj, '--.')
-            ax_pc.plot(oc.x_opt_real_scale[-1], cycle_res['mean_cycle_power'], 's', color='C{}'.format(success_counter), mfc='None')
-            for a, x in zip(ax_vars, oc.x_opt_real_scale[:4]*np.array([1, 1, 180./np.pi, 1])): a.plot(oc.x_opt_real_scale[-1], x, 's', color='C{}'.format(success_counter), mfc='None')
+            i_clr = success_counter // plot_nth_step
+            plot_sol(cycle_res, i_clr, ax, ax_traj, '--.')
+            ax_pc.plot(oc.x_opt_real_scale[-1], cycle_res['mean_cycle_power'], 's', color='C{}'.format(i_clr), mfc='None')
+            for a, x in zip(ax_vars, oc.x_opt_real_scale[:4]*np.array([1, 1, 180./np.pi, 1])): a.plot(oc.x_opt_real_scale[-1], x, 's', color='C{}'.format(i_clr), mfc='None')
             success_counter += 1
 
             opt_vars = np.vstack((opt_vars, [oc.x_opt_real_scale[:4]]))
@@ -824,6 +844,226 @@ def construct_power_curve(starting_wind_speed=9., wind_speed_step=[.2, .5], powe
     success = success_low[::-1] + success_high
     wind_speeds = wind_speeds_low[::-1] + wind_speeds_high
 
+    wind_speeds_s, mcps_s = zip(*[(v, mcp) for v, mcp, s in zip(wind_speeds, mcps, success) if s])
+    ax_pc.plot(wind_speeds_s, mcps_s, '.-')
+    ax_pc.plot(wind_speeds, mcps)
+
+    wind_speeds = np.array(wind_speeds)
+    success = np.array(success)
+    ax_pc.plot(wind_speeds[~success], [0]*np.sum(~success), 'x')
+    ax_pc.set_ylim([0, 1e4])
+
+    ax_vars[0].plot(wind_speeds, opt_vars[:, 0], '.-')
+    ax_vars[0].plot(wind_speeds[~success], opt_vars[~success, 0], 'x')
+    ax_vars[0].set_ylabel('Duration\nreel-out [s]')
+    ax_vars[1].plot(wind_speeds, opt_vars[:, 1], '.-')
+    ax_vars[1].plot(wind_speeds[~success], opt_vars[~success, 1], 'x')
+    ax_vars[1].set_ylabel('Duration\nreel-in [s]')
+    ax_vars[2].plot(wind_speeds, opt_vars[:, 2] * 180. / np.pi, '.-')
+    ax_vars[2].plot(wind_speeds[~success], opt_vars[~success, 2] * 180. / np.pi, 'x')
+    ax_vars[2].set_ylabel('Elevation\nangle [deg]')
+    ax_vars[3].plot(wind_speeds, opt_vars[:, 3], '.-')
+    ax_vars[3].plot(wind_speeds[~success], opt_vars[~success, 3], 'x')
+    ax_vars[3].set_ylabel('Min. tether\nlength [m]')
+
+
+def test_convergence(starting_wind_speed=9., wind_speed_step=3., env_state=LogProfile(), maxiter=300):
+    from kitev3_10mm_tether import sys_props_v3
+
+    ax_pc = plt.figure().gca()
+    ax_vars = plt.subplots(4, 1, sharex=True)[1]
+
+    fig, ax = plt.subplots(5, 1)
+    ax_profile, ax_traj = plt.subplots(1, 2, sharey=True)[1]
+    env_state.set_reference_wind_speed(1)
+    env_state.plot_wind_profile(ax_profile)
+    ax_traj.set_aspect('equal')
+    ax_traj.plot(150*np.cos(np.linspace(0, np.pi/2, 15)), 150*np.sin(np.linspace(0, np.pi/2, 15)), ':', color='grey')
+
+    v = starting_wind_speed
+
+    print("Wind speed = {:.1f} m/s".format(v))
+    env_state.set_reference_wind_speed(v)
+    oc = OptimizerCycleKappa(sys_props_v3, env_state)
+    oc.optimize(maxiter=300)
+
+    assert oc.op_res['success']
+    x0_next = oc.x_opt_real_scale
+    cycle_res = oc.eval_point()
+
+    plot_sol(cycle_res, 0, ax, ax_traj, '-s')
+    ax_pc.plot(v, cycle_res['mean_cycle_power'], 's', color='C0', mfc='None')
+    for a, x in zip(ax_vars, oc.x_opt_real_scale[:4]*np.array([1, 1, 180./np.pi, 1])): a.plot(v, x, 's', color='C0', mfc='None')
+
+    v += wind_speed_step
+
+    print("Wind speed = {:.1f} m/s".format(v))
+    env_state.set_reference_wind_speed(v)
+    oc = OptimizerCycleKappa(sys_props_v3, env_state)
+    oc.x0_real_scale = x0_next
+    oc.optimize(maxiter=maxiter)
+    cycle_res = oc.eval_point()
+
+    plot_sol(cycle_res, 1, ax, ax_traj, '-s')
+    ax_pc.plot(v, cycle_res['mean_cycle_power'], 's', color='C1', mfc='None')
+    for a, x in zip(ax_vars, oc.x_opt_real_scale[:4] * np.array([1, 1, 180. / np.pi, 1])): a.plot(v, x, 's', color='C1',
+                                                                                                  mfc='None')
+
+    oc = OptimizerCycleCutKappa(sys_props_v3, env_state, obj_factors=[0, 1], force_wind_speed=v)
+    oc.x0_real_scale = np.hstack([x0_next, starting_wind_speed])
+    x_opt = oc.optimize(maxiter=maxiter)
+    print(x_opt[-1])
+    cycle_res = oc.eval_point()
+
+    plot_sol(cycle_res, 1, ax, ax_traj, '-s')
+    ax_pc.plot(v, cycle_res['mean_cycle_power'], 's', color='C1', mfc='None')
+    for a, x in zip(ax_vars, oc.x_opt_real_scale[:4] * np.array([1, 1, 180. / np.pi, 1])): a.plot(v, x, 's', color='C1', mfc='None')
+
+
+def construct_power_curve_test(wind_speed_step=1.5, power_optimization_limits=22, env_state=LogProfile(), maxiter=300):
+    from kitev3_10mm_tether import sys_props_v3
+    cut = True
+    plot_nth_step = 1
+
+    ax_pc = plt.figure().gca()
+    ax_vars = plt.subplots(4, 1, sharex=True)[1]
+
+    fig, ax = plt.subplots(5, 1)
+    ax_profile, ax_traj = plt.subplots(1, 2, sharey=True)[1]
+    env_state.set_reference_wind_speed(1)
+    env_state.plot_wind_profile(ax_profile)
+    ax_traj.set_aspect('equal')
+    ax_traj.plot(150*np.cos(np.linspace(0, np.pi/2, 15)), 150*np.sin(np.linspace(0, np.pi/2, 15)), ':', color='grey')
+
+    opt_vars = np.empty((0, 4))
+    success_counter = 0
+    mcps, success, wind_speeds = [], [], []
+
+    # print("Starting wind speed = {:.1f} m/s".format(starting_wind_speed))
+    # env_state.set_reference_wind_speed(starting_wind_speed)
+    # oc = OptimizerCycleKappa(sys_props_v3, env_state)
+    # oc.optimize(maxiter=300)
+    # assert oc.op_res['success']
+    # x0_next = oc.x_opt_real_scale
+
+    # Cut-in
+    oc = OptimizerCycleCutKappa(sys_props_v3, env_state, 'in')
+    # oc.x0_real_scale = np.hstack([x0_next, starting_wind_speed])
+    x_opt = oc.optimize(maxiter=maxiter)
+    x0_next = x_opt[:-1]
+
+    cons = oc.eval_point(relax_errors=True)[1]
+    print("Max. abs. equality constraints:", np.max(np.abs(cons[:oc.N_EQ_CONS])))
+    print("Equality constraints:", cons[:oc.N_EQ_CONS])
+    print("Min. inequality constraint:", np.min(cons[oc.N_EQ_CONS:]))
+    print("Inequality constraints:", cons[oc.N_EQ_CONS:])
+    print("Minimum wind speed @ 100 m = {:.2f} m/s".format(x_opt[-1]))
+    env_state.calculate(10)
+    print("Minimum wind speed @ 10 m = {:.2f} m/s".format(env_state.wind_speed))
+    env_state.set_reference_wind_speed(x_opt[-1])
+    cycle_res = oc.eval_point()
+    print("Mean cycle power = {:.2f}".format(cycle_res['mean_cycle_power']))
+    i_clr = success_counter // plot_nth_step
+    plot_sol(cycle_res, i_clr, ax, ax_traj, ls='--.')
+    ax_pc.plot(x_opt[-1], cycle_res['mean_cycle_power'], 's', color='C{}'.format(i_clr), mfc='None')
+    for a, x in zip(ax_vars, x_opt[:4]*np.array([1, 1, 180./np.pi, 1])): a.plot(x_opt[-1], x, 's', color='C{}'.format(i_clr), mfc='None')
+    success_counter += 1
+
+    opt_vars = np.vstack((opt_vars, [oc.x_opt_real_scale[:4]]))
+    mcps.append(cycle_res['mean_cycle_power'])
+    success.append(oc.op_res['success'])
+    wind_speeds.append(x_opt[-1])
+
+    # High
+    v = x_opt[-1] + wind_speed_step
+    while True:
+        print("Wind speed = {:.1f} m/s".format(v))
+        env_state.set_reference_wind_speed(v)
+        oc = OptimizerCycleKappa(sys_props_v3, env_state)
+        oc.x0_real_scale = x0_next
+        try:
+            oc.optimize(maxiter=maxiter)
+        except FloatingPointError:
+            if v > power_optimization_limits:
+                break
+            else:
+                opt_vars = np.vstack((opt_vars, [np.nan]*4))
+                mcps.append(np.nan)
+                success.append(False)
+                wind_speeds.append(v)
+
+                v += wind_speed_step
+                continue
+
+        if oc.op_res['success']:  # or oc.op_res.get('exit_mode', -1) == 9:
+            x0_next = oc.x_opt_real_scale
+            v0_cut_out = v
+            print("x_opt = ", x0_next)
+            cycle_res = oc.eval_point()
+        else:
+            try:
+                cycle_res = oc.eval_point()
+            except:
+                cycle_res = {}
+
+        opt_vars = np.vstack((opt_vars, [oc.x_opt_real_scale[:4]]))
+        mcps.append(cycle_res.get('mean_cycle_power', np.nan))
+        success.append(oc.op_res['success'])
+        wind_speeds.append(v)
+
+        cons = oc.eval_point(relax_errors=True)[1]
+        print("Max. abs. equality constraints:", np.max(np.abs(cons[:oc.N_EQ_CONS])))
+        print("Min. inequality constraint:", np.min(cons[oc.N_EQ_CONS:]))
+        # plt.figure()
+        # plt.bar(range(oc.N_INEQ_CONS), cons[oc.N_EQ_CONS:])
+        # plt.xticks(range(oc.N_INEQ_CONS), oc.INEQ_CONS_LABELS, rotation='vertical')
+        # if not oc.op_res['success']:
+        #     plt.figure()
+        #     plt.bar(range(oc.N_EQ_CONS), cons[:oc.N_EQ_CONS])
+        #     plt.xticks(range(oc.N_EQ_CONS), oc.EQ_CONS_LABELS, rotation='vertical')
+
+        if oc.op_res['success']:
+            if success_counter % plot_nth_step == 0:
+                i_clr = success_counter // plot_nth_step
+                plot_sol(cycle_res, i_clr, ax, ax_traj)
+                ax_pc.plot(v, cycle_res['mean_cycle_power'], 's', color='C{}'.format(i_clr), mfc='None')
+                for a, x in zip(ax_vars, oc.x_opt_real_scale[:4]*np.array([1, 1, 180./np.pi, 1])): a.plot(v, x, 's', color='C{}'.format(i_clr), mfc='None')
+            success_counter += 1
+
+        if not oc.op_res['success'] and v > power_optimization_limits:
+            break
+        v += wind_speed_step
+
+    if cut:
+        # Cut-out
+        for f in [.5, .1, 0]:
+            oc = OptimizerCycleCutKappa(sys_props_v3, env_state, 'out', [1, f])
+            oc.x0_real_scale = np.hstack([x0_next, v0_cut_out])
+            oc.optimize(maxiter=maxiter)
+
+            cons = oc.eval_point(relax_errors=True)[1]
+            print("Max. abs. equality constraints:", np.max(np.abs(cons[:oc.N_EQ_CONS])))
+            print("Equality constraints:", cons[:oc.N_EQ_CONS])
+            print("Min. inequality constraint:", np.min(cons[oc.N_EQ_CONS:]))
+            print("Inequality constraints:", cons[oc.N_EQ_CONS:])
+            print("Minimum wind speed @ 100 m = {:.2f} m/s".format(oc.x_opt_real_scale[-1]))
+            env_state.calculate(10)
+            print("Minimum wind speed @ 10 m = {:.2f} m/s".format(env_state.wind_speed))
+            env_state.set_reference_wind_speed(oc.x_opt_real_scale[-1])
+            cycle_res = oc.eval_point()
+            print("Mean cycle power = {:.2f}".format(cycle_res['mean_cycle_power']))
+            i_clr = success_counter // plot_nth_step
+            plot_sol(cycle_res, i_clr, ax, ax_traj, '--.')
+            ax_pc.plot(oc.x_opt_real_scale[-1], cycle_res['mean_cycle_power'], 's', color='C{}'.format(i_clr), mfc='None')
+            for a, x in zip(ax_vars, oc.x_opt_real_scale[:4]*np.array([1, 1, 180./np.pi, 1])): a.plot(oc.x_opt_real_scale[-1], x, 's', color='C{}'.format(i_clr), mfc='None')
+            success_counter += 1
+
+            opt_vars = np.vstack((opt_vars, [oc.x_opt_real_scale[:4]]))
+            mcps.append(cycle_res['mean_cycle_power'])
+            success.append(oc.op_res['success'])
+            wind_speeds.append(oc.x_opt_real_scale[-1])
+
+    #Power curve
     wind_speeds_s, mcps_s = zip(*[(v, mcp) for v, mcp, s in zip(wind_speeds, mcps, success) if s])
     ax_pc.plot(wind_speeds_s, mcps_s, '.-')
     ax_pc.plot(wind_speeds, mcps)
@@ -876,5 +1116,6 @@ if __name__ == "__main__":
     # eval_limit(env_state=env_state, wind_speeds=np.arange(25, 26.5, .5), cut='out')
     # eval_limit(env_state=LogProfile(), wind_speeds=np.arange(21, 23., .5), cut='out')
 
-    construct_power_curve()  #env_state=env_state, power_optimization_limits=[9, 26])
+    construct_power_curve_test()  #env_state=env_state, power_optimization_limits=[9, 26])
+    # test_convergence()
     plt.show()
