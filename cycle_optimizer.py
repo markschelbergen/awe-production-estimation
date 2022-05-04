@@ -1,14 +1,16 @@
-from pyOpt import Optimization, SLSQP, Gradient
+from pyOpt import Optimization, SLSQP
 from scipy import optimize as op
 import numpy as np
 import matplotlib.pyplot as plt
 
-from qsm import Cycle
-from utils import flatten_dict
+from qsm import OptCycle, LogProfile, NormalisedWindTable1D
 
 
 class OptimizerError(Exception):
     pass
+
+
+n_points_reelin = 10
 
 
 def read_slsqp_output_file(print_details=True):
@@ -38,8 +40,14 @@ def read_slsqp_output_file(print_details=True):
                 break
 
     nit = i_iter
-    nfev = nfunc_line.split()[5]
-    njev = ngrad_line.split()[5]
+    try:
+        nfev = nfunc_line.split()[5]
+    except:
+        nfev = nfunc_line.split()[4][1:]
+    try:
+        njev = ngrad_line.split()[5]
+    except:
+        njev = ngrad_line.split()[4][1:]
 
     return nit, nfev, njev
 
@@ -49,6 +57,7 @@ def convert_optimization_result(op_sol, nit, nfev, njev, print_details, iprint):
     op_res = {
         'x': [v.value for v in op_sol._variables.values()],
         'success': op_sol.opt_inform['value'] == 0,
+        'exit_mode': op_sol.opt_inform['value'],
         'message': op_sol.opt_inform['text'],
         'fun': op_sol._objectives[0].value,
         'nit': nit,
@@ -69,12 +78,10 @@ def convert_optimization_result(op_sol, nit, nfev, njev, print_details, iprint):
 class Optimizer:
     """Class collecting useful functionalities for solving an optimization problem and evaluating the results using
     different settings and, thereby, enabling assessing the effect of these settings."""
-    def __init__(self, x0_real_scale, bounds_real_scale, scaling_x, reduce_x, reduce_ineq_cons,
-                 system_properties, environment_state):
+    def __init__(self, x0_real_scale, bounds_real_scale, scaling_x, n_ineq_cons, n_eq_cons, system_properties, environment_state):
         assert isinstance(x0_real_scale, np.ndarray)
         assert isinstance(bounds_real_scale, np.ndarray)
         assert isinstance(scaling_x, np.ndarray)
-        assert isinstance(reduce_x, np.ndarray)
 
         # Simulation side conditions.
         self.system_properties = system_properties
@@ -83,21 +90,13 @@ class Optimizer:
         # Optimization configuration.
         self.use_library = 'pyopt'  # Either 'pyopt' or 'scipy' can be opted. pyOpt is in general faster, however more
         # cumbersome to install.
-        self.use_parallel_processing = False  # Only compatible with pyOpt: used for determining the gradient. Script
-        # should be run using: mpiexec -n 4 python script.py, when using parallel processing. Parallel processing does
-        # not speed up solving the problem when only a limited number of processors are available.
 
         self.scaling_x = scaling_x  # Scaling the optimization variables will affect the optimization. In general, a
         # similar search range is preferred for each variable.
         self.x0_real_scale = x0_real_scale  # Optimization starting point.
         self.bounds_real_scale = bounds_real_scale  # Optimization variables bounds defining the search space.
-        self.reduce_x = reduce_x  # Reduce the search space by providing a tuple with id's of x to keep. Set to None for
-        # utilizing the full search space.
-        if isinstance(reduce_ineq_cons, int):
-            self.reduce_ineq_cons = np.arange(reduce_ineq_cons)  # Reduces the number of inequality constraints used for
-            # solving the problem.
-        else:
-            self.reduce_ineq_cons = reduce_ineq_cons
+        self.n_ineq_cons = n_ineq_cons
+        self.n_eq_cons = n_eq_cons
 
         # Settings inferred from the optimization configuration.
         self.x0 = None  # Scaled starting point.
@@ -106,7 +105,7 @@ class Optimizer:
         # Optimization operational attributes.
         self.x_last = None  # Optimization vector used for the latest evaluation function call.
         self.obj = None  # Value of the objective/cost function of the latest evaluation function call.
-        self.ineq_cons = None  # Values of the inequality constraint functions of the latest evaluation function call.
+        self.cons = None  # Values of the inequality constraint functions of the latest evaluation function call.
         self.x_progress = []  # Evaluated optimization vectors of every conducted optimization iteration - only tracked
         # when using Scipy.
 
@@ -118,12 +117,12 @@ class Optimizer:
         self.x0 = None
         self.x_last = None
         self.obj = None
-        self.ineq_cons = None
+        self.cons = None
         self.x_progress = []
         self.x_opt_real_scale = None
         self.op_res = None
 
-    def eval_point(self, plot_result=False, relax_errors=False, x_real_scale=None):
+    def eval_point(self, relax_errors=False, x_real_scale=None):
         """Evaluate simulation results using the provided optimization vector. Uses either the optimization vector
         provided as argument, the optimal vector, or the starting point for the simulation."""
         if x_real_scale is None:
@@ -131,9 +130,8 @@ class Optimizer:
                 x_real_scale = self.x_opt_real_scale
             else:
                 x_real_scale = self.x0_real_scale
-        kpis = self.eval_performance_indicators(x_real_scale, plot_result, relax_errors)
-        cons = self.eval_fun(x_real_scale, False, relax_errors=relax_errors)[1]
-        return cons, kpis
+        res = self.eval_fun(x_real_scale, scale_x=False, relax_errors=relax_errors)
+        return res
 
     def eval_fun_pyopt(self, x, *args):
         """PyOpt's implementation of SLSQP can produce NaN's in the optimization vector or contain values that violate
@@ -141,32 +139,23 @@ class Optimizer:
         if np.isnan(x).any():
             raise OptimizerError("Optimization vector contains NaN's.")
 
-        if self.reduce_x is not None:
-            x_full = self.x0.copy()
-            x_full[self.reduce_x] = x
-        else:
-            x_full = x
+        x_full = x
 
         bounds_adhered = (x_full - self.bounds_real_scale[:, 0]*self.scaling_x >= -1e6).all() and \
                          (x_full - self.bounds_real_scale[:, 1]*self.scaling_x <= 1e6).all()
         if not bounds_adhered:
             raise OptimizerError("Optimization bounds violated.")
 
-        obj, ineq_cons = self.eval_fun(x_full, *args)
-
-        return obj, [-c for c in ineq_cons], 0
+        obj, cons = self.eval_fun(x_full, *args)
+        return obj, [-c for c in cons], 0
 
     def obj_fun(self, x, *args):
         """Scipy's implementation of SLSQP uses separate functions for the objective and constraints. Since the
         objective and constraints result from the same simulation, a work around is provided to prevent running the same
         simulation twice."""
-        if self.reduce_x is not None:
-            x_full = self.x0.copy()
-            x_full[self.reduce_x] = x
-        else:
-            x_full = x
+        x_full = x
         if not np.array_equal(x_full, self.x_last):
-            self.obj, self.ineq_cons = self.eval_fun(x_full, *args)
+            self.obj, self.cons = self.eval_fun(x_full, *args)
             self.x_last = x_full.copy()
 
         return self.obj
@@ -175,19 +164,15 @@ class Optimizer:
         """Scipy's implementation of SLSQP uses separate functions for the objective and every constraint. Since the
         objective and constraints result from the same simulation, a work around is provided to prevent running the same
         simulation twice."""
-        if self.reduce_x is not None:
-            x_full = self.x0.copy()
-            x_full[self.reduce_x] = x
-        else:
-            x_full = x
+        x_full = x
         if not np.array_equal(x_full, self.x_last):
-            self.obj, self.ineq_cons = self.eval_fun(x_full, *args)
+            self.obj, self.cons = self.eval_fun(x_full, *args)
             self.x_last = x_full.copy()
 
         if return_i > -1:
-            return self.ineq_cons[return_i]
+            return self.cons[return_i]
         else:
-            return self.ineq_cons
+            return self.cons
 
     def callback_fun_scipy(self, x):
         """Function called when using Scipy for every optimization iteration (does not include function calls for
@@ -196,7 +181,7 @@ class Optimizer:
             raise OptimizerError("Optimization vector contains nan's.")
         self.x_progress.append(x.copy())
 
-    def optimize(self, *args, maxiter=30, iprint=-1):
+    def optimize(self, *args, maxiter=30, iprint=1):
         """Perform optimization."""
         self.clear_result_attributes()
         # Construct scaled starting point and bounds
@@ -205,11 +190,7 @@ class Optimizer:
         bounds[:, 0] = bounds[:, 0]*self.scaling_x
         bounds[:, 1] = bounds[:, 1]*self.scaling_x
 
-        if self.reduce_x is None:
-            starting_point = self.x0
-        else:
-            starting_point = self.x0[self.reduce_x]
-            bounds = bounds[self.reduce_x]
+        starting_point = self.x0
 
         print_details = True
         ftol, eps = 1e-6, 1e-6
@@ -219,7 +200,7 @@ class Optimizer:
                 'fun': self.cons_fun,
             }
             cons = []
-            for i in self.reduce_ineq_cons:
+            for i in range(self.n_ineq_cons):
                 cons.append(con.copy())
                 cons[-1]['args'] = (i, *args)
 
@@ -236,20 +217,15 @@ class Optimizer:
             op_problem = Optimization('Pumping cycle power', self.eval_fun_pyopt)
             op_problem.addObj('f')
 
-            if self.reduce_x is None:
-                x_range = range(len(self.x0))
-            else:
-                x_range = self.reduce_x
+            x_range = range(len(self.x0))
             for i_x, xi0, b in zip(x_range, starting_point, bounds):
                 op_problem.addVar('x{}'.format(i_x), 'c', lower=b[0], upper=b[1], value=xi0)
 
-            for i_c in self.reduce_ineq_cons:
-                op_problem.addCon('g{}'.format(i_c), 'i')
+            for i_c in range(self.n_eq_cons):
+                op_problem.addCon('g{}'.format(i_c), 'e')
 
-            if self.use_parallel_processing:
-                sens_mode = 'pgc'
-            else:
-                sens_mode = ''
+            for i_c in range(self.n_eq_cons, self.n_ineq_cons+self.n_eq_cons):
+                op_problem.addCon('g{}'.format(i_c), 'i')
 
             # grad = Gradient(op_problem, sens_type='FD', sens_mode=sens_mode, sens_step=eps)
             # f0, g0, _ = self.eval_fun_pyopt(starting_point)
@@ -263,7 +239,7 @@ class Optimizer:
             optimizer.setOption('MAXIT', maxiter)
             optimizer.setOption('ACC', ftol)
 
-            optimizer(op_problem, sens_type='FD', sens_mode=sens_mode, sens_step=eps, *args)
+            optimizer(op_problem, sens_type='FD', sens_step=eps, *args)
             op_sol = op_problem.solution(0)
 
             if iprint == 1:
@@ -275,397 +251,630 @@ class Optimizer:
         else:
             raise ValueError("Invalid library provided.")
 
-        if self.reduce_x is None:
-            res_x = self.op_res['x']
-        else:
-            res_x = self.x0.copy()
-            res_x[self.reduce_x] = self.op_res['x']
+        res_x = self.op_res['x']
         self.x_opt_real_scale = res_x/self.scaling_x
 
         return self.x_opt_real_scale
 
-    def plot_opt_evolution(self):
-        """Method can be called after finishing optimizing using Scipy to plot how the optimization evolved and arrived
-        at the final solution."""
-        fig, ax = plt.subplots(len(self.x_progress[0])+1, 2, sharex=True)
-        for i in range(len(self.x_progress[0])):
-            # Plot optimization variables.
-            ax[i, 0].plot([x[i] for x in self.x_progress])
-            ax[i, 0].grid(True)
-            ax[i, 0].set_ylabel('x[{}]'.format(i))
 
-            # Plot step size.
-            tmp = [self.x0]+self.x_progress
-            step_sizes = [b[i] - a[i] for a, b in zip(tmp[:-1], tmp[1:])]
-
-            ax[i, 1].plot(step_sizes)
-            ax[i, 1].grid(True)
-            ax[i, 1].set_ylabel('dx[{}]'.format(i))
-
-        # Plot objective.
-        obj_res = [self.obj_fun(x) for x in self.x_progress]
-        ax[-1, 0].plot([res for res in obj_res])
-        ax[-1, 0].grid()
-        ax[-1, 0].set_ylabel('Objective [-]')
-
-        # Plot constraints.
-        cons_res = [self.cons_fun(x, -1)[self.reduce_ineq_cons] for x in self.x_progress]
-        cons_lines = ax[-1, 1].plot([res for res in cons_res])
-
-        # add shade when one of the constraints is violated
-        active_cons = [any([c < -1e-6 for c in res]) for res in cons_res]
-        ax[-1, 1].fill_between(range(len(active_cons)), 0, 1, where=active_cons, alpha=0.4,
-                               transform=ax[-1, 1].get_xaxis_transform())
-
-        ax[-1, 1].legend(cons_lines, ["constraint {}".format(i) for i in range(len(cons_lines))],
-                         bbox_to_anchor=(1.04, 1), loc="upper left")
-        plt.subplots_adjust(right=0.7)
-
-        ax[-1, 1].grid()
-        ax[-1, 1].set_ylabel('Constraint [-]')
-
-        ax[-1, 0].set_xlabel('Iteration [-]')
-        ax[-1, 1].set_xlabel('Iteration [-]')
-
-    def check_gradient(self, x_real_scale=None):
-        """Evaluate forward finite difference gradient of objective function at given point. Logarithmic sensitivities
-        are evaluated to assess how influential each parameter is at the evaluated point."""
-        self.x0 = self.x0_real_scale*self.scaling_x
-        step_size = 1e-6
-
-        # Evaluate the gradient at the point set by either the optimization vector provided as argument, the optimal
-        # vector, or the starting point for the simulation.
-        if x_real_scale is None:
-            if self.x_opt_real_scale is not None:
-                x_real_scale = self.x_opt_real_scale
-            else:
-                x_real_scale = self.x0_real_scale
-        if self.scaling_x is not None:
-            x_ref = x_real_scale*self.scaling_x
-        else:
-            x_ref = x_real_scale
-
-        obj_ref = self.obj_fun(x_ref)
-        ffd_gradient, log_sensitivities = [], []
-        for i, xi_ref in enumerate(x_ref):
-            x_ref_perturbed = x_ref.copy()
-            x_ref_perturbed[i] += step_size
-            grad = (self.obj_fun(x_ref_perturbed) - obj_ref) / step_size
-            ffd_gradient.append(grad)
-            log_sensitivities.append(xi_ref/obj_ref*grad)
-
-        return ffd_gradient, log_sensitivities
-
-    def perform_local_sensitivity_analysis(self):
-        """Sweep search range of one of the variables at the time and calculate objective and constraint functions.
-        Plot the results of each sweep in a separate panel."""
-        ref_point_label = "x_ref"
-        if self.reduce_x is None:
-            red_x = np.arange(len(self.x0_real_scale))
-        else:
-            red_x = self.reduce_x
-        n_plots = len(red_x)
-        bounds = self.bounds_real_scale[red_x]
-
-        # Perform the sensitivity analysis around the intersection point set by either the optimization vector provided
-        # as argument, the optimal vector, or the starting point for the simulation.
-        if self.x_opt_real_scale is not None:
-            x_ref_real_scale = self.x_opt_real_scale
-        else:
-            x_ref_real_scale = self.x0_real_scale
-        f_ref, cons_ref = self.eval_fun(x_ref_real_scale, scale_x=False)
-
-        fig, ax = plt.subplots(n_plots)
-        if n_plots == 1:
-            ax = [ax]
-        fig.subplots_adjust(hspace=.3)
-
-        for i, b in enumerate(bounds):
-            # Determine objective and constraint functions along given variable.
-            lb, ub = b
-            xi_sweep = np.linspace(lb, ub, 50)
-            f, g, active_g = [], [], []
-            for xi in xi_sweep:
-                x_full = list(x_ref_real_scale)
-                x_full[red_x[i]] = xi
-
-                try:
-                    res_eval = self.eval_fun(x_full, scale_x=False)
-                    f.append(res_eval[0])
-                    cons = res_eval[1][self.reduce_ineq_cons]
-                    g.append(res_eval[1])
-                    active_g.append(any([c < -1e-6 for c in cons]))
-                except:
-                    f.append(None), g.append(None), active_g.append(False)
-
-            # Plot objective function and marker at the reference point.
-            ax[i].plot(xi_sweep, f, '--', label='objective')
-            x_ref = x_ref_real_scale[red_x[i]]
-            ax[i].plot(x_ref, f_ref, 'x', label=ref_point_label, markersize=12)
-
-            # Plot constraint functions.
-            for i_cons in self.reduce_ineq_cons:
-                cons_line = ax[i].plot(xi_sweep, [c[i_cons] if c is not None else None for c in g],
-                                       label='constraint {}'.format(i_cons))
-                clr = cons_line[0].get_color()
-                ax[i].plot(x_ref, cons_ref[i_cons], 's', markerfacecolor='None', color=clr)
-
-            # Mark ranges where constraint is active with a background color.
-            ax[i].fill_between(xi_sweep, 0, 1, where=active_g, alpha=0.4, transform=ax[i].get_xaxis_transform())
-
-            ax[i].set_xlabel(self.OPT_VARIABLE_LABELS[red_x[i]])
-            ax[i].set_ylabel("Response [-]")
-            ax[i].grid()
-
-        ax[0].legend(bbox_to_anchor=(1.04, 1), loc="upper left")
-        ax[0].set_title("v={:.1f}m/s".format(self.environment_state.wind_speed))
-        plt.subplots_adjust(right=0.7)
-
-    def plot_sensitivity_efficiency_indicators(self, i_x=0):
-        """Sweep search range of the requested variable and calculate and plot efficiency indicators."""
-        ref_point_label = "x_ref"
-
-        # Perform the sensitivity analysis around the intersection point set by either the optimization vector provided
-        # as argument, the optimal vector, or the starting point for the simulation.
-        if self.x_opt_real_scale is not None:
-            x_real_scale = self.x_opt_real_scale
-        else:
-            x_real_scale = self.x0_real_scale
-
-        # Reference point
-        x_ref = x_real_scale[i_x]
-        power_cycle_ref = self.eval_performance_indicators(x_real_scale, scale_x=False)['average_power']['cycle']
-        power_out_ref = self.eval_performance_indicators(x_real_scale, scale_x=False)['average_power']['out']
-        xlabel = self.OPT_VARIABLE_LABELS[i_x]
-
-        # Sweep between limits and write results to
-        lb, ub = self.bounds_real_scale[i_x]
-        xi_sweep = np.linspace(lb, ub, 100)
-        power_cycle_norm, power_out_norm, g, active_g, duty_cycle, pumping_eff = [], [], [], [], [], []
-        for xi in xi_sweep:
-            x_full = list(x_real_scale)
-            x_full[i_x] = xi
-
-            try:
-                res_eval = self.eval_fun(x_full, scale_x=False)
-                kpis = self.eval_performance_indicators(x_full, scale_x=False)
-                power_cycle_norm.append(kpis['average_power']['cycle']/power_cycle_ref)
-                if kpis['average_power']['out']:
-                    power_out_norm.append(kpis['average_power']['out']/power_out_ref)
-                else:
-                    power_out_norm.append(None)
-                cons = res_eval[1][self.reduce_ineq_cons]
-                g.append(res_eval[1])
-                active_g.append(any([c < -1e-6 for c in cons]))
-                duty_cycle.append(kpis['duty_cycle'])
-                pumping_eff.append(kpis['pumping_efficiency'])
-            except:
-                power_cycle_norm.append(None), power_out_norm.append(None)
-                duty_cycle.append(None), pumping_eff.append(None)
-                g.append(None), active_g.append(False)
-
-        fig, ax = plt.figure()
-        ax.plot(xi_sweep, power_cycle_norm, '--', label='normalized cycle power')
-        ax.plot(xi_sweep, power_out_norm, '--', label='normalized traction power')
-        ax.plot(xi_sweep, duty_cycle, label='duty cycle')
-        ax.plot(xi_sweep, pumping_eff, label='pumping efficiency')
-
-        # Plot marker at the reference point.
-        ax.plot(x_ref, 1, 'x', label=ref_point_label, markersize=12)
-        ax.fill_between(xi_sweep, 0, 1, where=active_g, alpha=0.4, transform=ax.get_xaxis_transform())
-        ax.set_xlabel(xlabel.replace('\n', ' '))
-        ax.set_ylabel("Response [-]")
-        ax.grid()
-
-        ax.legend(bbox_to_anchor=(1.04, 1), loc="upper left")
-        ax.set_title("v={:.1f}m/s".format(self.environment_state.wind_speed))
-        plt.subplots_adjust(right=0.7)
-
-
-class OptimizerCycle(Optimizer):
+class OptimizerCycleKappa(Optimizer):
     """Tether force controlled cycle optimizer. Zero reeling speed is used as setpoint for transition phase."""
+    N_POINTS_PER_PHASE = [5, n_points_reelin]
     OPT_VARIABLE_LABELS = [
-        "Reel-out\nforce [N]",
-        "Reel-in\nforce [N]",
-        "Elevation\nangle [rad]",
-        "Reel-in tether\nlength [m]",
-        "Minimum tether\nlength [m]"
+        "Duration reel-out [s]",
+        "Duration reel-in [s]",
+        "Reel-out\nelevation\nangle [rad]",
+        "Minimum tether length [m]",
     ]
-    X0_REAL_SCALE_DEFAULT = np.array([5000, 500, 0.523599, 120, 150])
-    SCALING_X_DEFAULT = np.array([1e-4, 1e-4, 1, 1e-3, 1e-3])
-    BOUNDS_REAL_SCALE_DEFAULT = np.array([
-        [np.nan, np.nan],
-        [np.nan, np.nan],
-        [25*np.pi/180, 60.*np.pi/180.],
-        [150, 250],
-        [150, 250],
-    ])
+    OPT_VARIABLE_LABELS = OPT_VARIABLE_LABELS + \
+                          ["Reel-out\nforce {} [N]".format(i + 1) for i in range(N_POINTS_PER_PHASE[0])] + \
+                          ["Reel-in\nforce {} [N]".format(i + 1) for i in range(N_POINTS_PER_PHASE[1])] + \
+                          ["Kinematics\nratios out".format(i + 1) for i in range(N_POINTS_PER_PHASE[0])] + \
+                          ["Kinematics\nratios in".format(i + 1) for i in range(N_POINTS_PER_PHASE[1])]
 
-    def __init__(self, cycle_settings, system_properties, environment_state, reduce_x=None, reduce_ineq_cons=None):
+    X0_REAL_SCALE_DEFAULT = np.array([30, 20, 30 * np.pi / 180., 170])
+    X0_REAL_SCALE_DEFAULT = np.hstack([X0_REAL_SCALE_DEFAULT, np.ones(N_POINTS_PER_PHASE[0]) * 2000,
+                                       np.ones(N_POINTS_PER_PHASE[1]) * 1500, np.ones(N_POINTS_PER_PHASE[0]) * 4,
+                                       np.ones(N_POINTS_PER_PHASE[1]) * 1.5])
+    SCALING_X_DEFAULT = np.array([1e-2, 1e-2, 1, 1e-3])
+    SCALING_X_DEFAULT = np.hstack([SCALING_X_DEFAULT, np.ones(np.sum(N_POINTS_PER_PHASE)) * 1e-4,
+                                   np.ones(np.sum(N_POINTS_PER_PHASE))])
+    BOUNDS_REAL_SCALE_DEFAULT = np.array([
+        [1, 500],
+        [20, 300],
+        [25*np.pi/180, 70.*np.pi/180.],
+        [100, np.inf],
+    ])
+    BOUNDS_REAL_SCALE_DEFAULT = np.append(BOUNDS_REAL_SCALE_DEFAULT, np.empty((np.sum(N_POINTS_PER_PHASE), 2))*np.nan, axis=0)
+    BOUNDS_REAL_SCALE_DEFAULT = np.append(BOUNDS_REAL_SCALE_DEFAULT, np.array([[0, 15]] * np.sum(N_POINTS_PER_PHASE)), axis=0)
+    N_INEQ_CONS = np.sum(N_POINTS_PER_PHASE)*3 + N_POINTS_PER_PHASE[1]
+    INEQ_CONS_LABELS = ['Reel-in force reduction {}'.format(i) for i in range(N_POINTS_PER_PHASE[1]-1)] + \
+                       ['Min. reel-out speed {}'.format(i) for i in range(N_POINTS_PER_PHASE[0])] + \
+                       ['Max. reel-out speed {}'.format(i) for i in range(N_POINTS_PER_PHASE[0])] + \
+                       ['Max. reel-in speed {}'.format(i) for i in range(N_POINTS_PER_PHASE[1])] + \
+                       ['Min. tangential speed out {}'.format(i) for i in range(N_POINTS_PER_PHASE[0])] + \
+                       ['Min. tangential speed in {}'.format(i) for i in range(N_POINTS_PER_PHASE[1])] + \
+                       ['Min. height out'] + \
+                       ['Max. height in {}'.format(i) for i in range(N_POINTS_PER_PHASE[1])]
+    N_EQ_CONS = 1 + np.sum(N_POINTS_PER_PHASE)
+    EQ_CONS_LABELS = ['Tether length periodicity'] + \
+                     ['L/D error out {}'.format(i) for i in range(N_POINTS_PER_PHASE[0])] + \
+                     ['L/D error in {}'.format(i) for i in range(N_POINTS_PER_PHASE[1])]
+
+    def __init__(self, system_properties, environment_state):
         # Initiate attributes of parent class.
         bounds = self.BOUNDS_REAL_SCALE_DEFAULT.copy()
-        bounds[0, :] = [system_properties.tether_force_min_limit, system_properties.tether_force_max_limit]
-        bounds[1, :] = [system_properties.tether_force_min_limit, system_properties.tether_force_max_limit]
-        if reduce_ineq_cons is None:
-            reduce_ineq_cons = np.arange(4)
-        super().__init__(self.X0_REAL_SCALE_DEFAULT.copy(), bounds, self.SCALING_X_DEFAULT.copy(),
-                         reduce_x, reduce_ineq_cons, system_properties, environment_state)
+        bounds[4:4+np.sum(self.N_POINTS_PER_PHASE), :] = [system_properties.tether_force_min_limit, system_properties.tether_force_max_limit]
+        super().__init__(self.X0_REAL_SCALE_DEFAULT.copy(), bounds, self.SCALING_X_DEFAULT.copy(), self.N_INEQ_CONS,
+                         self.N_EQ_CONS, system_properties, environment_state)
 
-        # Set cycle settings after printing the settings that may be overruled by the optimization.
-        cycle_settings.setdefault('cycle', {})
-        cycle_keys = list(flatten_dict(cycle_settings))
-        overruled_keys = []
-        for k in ['cycle.elevation_angle_traction', 'cycle.tether_length_start_retraction',
-                  'cycle.tether_length_end_retraction', 'retraction.control', 'transition.control', 'traction.control']:
-            if k in cycle_keys:
-                overruled_keys.append(k)
-        if overruled_keys:
-            print("Overruled cycle setting: " + ", ".join(overruled_keys) + ".")
-        self.cycle_settings = cycle_settings
-
-    def eval_fun(self, x, scale_x=True, **kwargs):
+    def eval_fun(self, x, scale_x=True, relax_errors=True):
         """Method calculating the objective and constraint functions from the eval_performance_indicators method output.
         """
         # Convert the optimization vector to real scale values and perform simulation.
-        if scale_x and self.scaling_x is not None:
+        if scale_x:
             x_real_scale = x/self.scaling_x
         else:
             x_real_scale = x
-        res = self.eval_performance_indicators(x_real_scale, **kwargs)
+        duration_out = x_real_scale[0]
+        tether_length_end = x_real_scale[3]
+        forces_out = x_real_scale[4:4+self.N_POINTS_PER_PHASE[0]]
+        forces_in = x_real_scale[4+self.N_POINTS_PER_PHASE[0]:4+np.sum(self.N_POINTS_PER_PHASE)]
+        kappas_out = x_real_scale[4+np.sum(self.N_POINTS_PER_PHASE):
+                                  4+np.sum(self.N_POINTS_PER_PHASE)+self.N_POINTS_PER_PHASE[0]]
+        kappas_in = x_real_scale[4+np.sum(self.N_POINTS_PER_PHASE)+self.N_POINTS_PER_PHASE[0]:
+                                 4+2*np.sum(self.N_POINTS_PER_PHASE)]
+
+        cycle = OptCycle(self.system_properties, self.environment_state)
+        cycle.n_points_per_phase = self.N_POINTS_PER_PHASE
+        cycle_res = cycle.run_simulation(*x_real_scale[:4], forces_out, forces_in, kappas_out, kappas_in, relax_errors=relax_errors)
+        if not relax_errors:
+            return cycle_res
 
         # Prepare the simulation by updating simulation parameters.
         env_state = self.environment_state
         env_state.calculate(100.)
-        power_wind_100m = .5 * env_state.air_density * env_state.wind_speed ** 3
+        power_wind_100m = .5*env_state.air_density*env_state.wind_speed**3
 
         # Determine optimization objective and constraints.
-        obj = -res['average_power']['cycle']/power_wind_100m/self.system_properties.kite_projected_area
+        obj = -cycle_res['mean_cycle_power']/power_wind_100m/self.system_properties.kite_projected_area
 
-        # When speed limits are active during the optimization (see determine_new_steady_state method of Phase
-        # class in qsm.py), the setpoint reel-out/reel-in forces are overruled. For special cases, the respective
-        # optimization variables won't affect the simulation. The lower constraints avoid random steps between
-        # iterations and drives the variables towards an extremum value of the force during the respective phase.
-        if res['min_tether_force']['out'] == np.inf:
-            res['min_tether_force']['out'] = 0.
-        force_out_setpoint_min = (res['min_tether_force']['out'] - x_real_scale[0])*1e-2 + 1e-6
-        force_in_setpoint_max = (res['max_tether_force']['in'] - x_real_scale[1])*1e-2 + 1e-6
+        eq_cons = np.hstack([[(cycle_res['tether_length_end']-tether_length_end)*1e-3],
+                             cycle_res['out']['lift_to_drag_errors'], cycle_res['in']['lift_to_drag_errors']])
 
         # The maximum reel-out tether force can be exceeded when the tether force control is overruled by the maximum
         # reel-out speed limit and the imposed reel-out speed yields a tether force exceeding its set point. This
         # scenario is prevented by the lower constraint.
-        force_max_limit = self.system_properties.tether_force_max_limit
-        max_force_violation_traction = res['max_tether_force']['out'] - force_max_limit
-        ineq_cons_traction_max_force = -max_force_violation_traction/force_max_limit + 1e-6
+        speed_min_limit = self.system_properties.reeling_speed_min_limit
+        speed_max_limit = self.system_properties.reeling_speed_max_limit
 
-        # Constraint on the number of cross-wind patterns. It is assumed that a realistic reel-out trajectory should
-        # include at least one crosswind pattern.
-        if res["n_crosswind_patterns"] is not None:
-            ineq_cons_cw_patterns = res["n_crosswind_patterns"] - 1
+        ineq_cons = []
+        for i in range(self.N_POINTS_PER_PHASE[1]-1):
+            ineq_cons.append(forces_in[i]-forces_in[i+1])
+        for i in range(self.N_POINTS_PER_PHASE[0]):
+            speed_violation_traction = cycle_res['out']['reeling_speeds'][i] - speed_min_limit
+            ineq_cons.append(speed_violation_traction / speed_max_limit)
+        for i in range(self.N_POINTS_PER_PHASE[0]):
+            speed_violation_traction = cycle_res['out']['reeling_speeds'][i] - speed_max_limit
+            ineq_cons.append(-speed_violation_traction / speed_max_limit)
+        # for i in range(self.N_POINTS_PER_PHASE[1]):
+        #     # speed_violation_retraction = -cycle_res['in']['reeling_speeds'][i] - speed_min_limit
+        #     # ineq_cons.append(speed_violation_retraction / speed_max_limit)
+        #     ineq_cons.append(-cycle_res['in']['reeling_speeds'][i])
+        for i in range(self.N_POINTS_PER_PHASE[1]):
+            speed_violation_retraction = -cycle_res['in']['reeling_speeds'][i] - speed_max_limit
+            ineq_cons.append(-speed_violation_retraction / speed_max_limit)
+        for v_tau in cycle_res['out']['tangential_speeds']:
+            pattern_duration = 300/v_tau
+            ineq_cons.append(duration_out/pattern_duration - 1)
+        ineq_cons += cycle_res['in']['tangential_speed_factors']
+        ineq_cons += [cycle_res['out']['kite_positions'][0].z - 100]
+        ineq_cons += [500 - kp.z for kp in cycle_res['in']['kite_positions']]
+
+        return obj, np.hstack([eq_cons, np.array(ineq_cons)])
+
+
+class OptimizerCycleCutKappa(Optimizer):
+    """Tether force controlled cycle optimizer. Zero reeling speed is used as setpoint for transition phase."""
+    N_POINTS_PER_PHASE = [5, n_points_reelin]
+    OPT_VARIABLE_LABELS = [
+        "Duration reel-out [s]",
+        "Duration reel-in [s]",
+        "Reel-out\nelevation\nangle [rad]",
+        "Minimum tether length [m]",
+    ]
+    OPT_VARIABLE_LABELS = OPT_VARIABLE_LABELS + \
+                          ["Reel-out\nforce {} [N]".format(i+1) for i in range(N_POINTS_PER_PHASE[0])] + \
+                          ["Reel-in\nforce {} [N]".format(i+1) for i in range(N_POINTS_PER_PHASE[1])] + \
+                          ["Kinematics\nratios out".format(i+1) for i in range(N_POINTS_PER_PHASE[0])] + \
+                          ["Kinematics\nratios in".format(i+1) for i in range(N_POINTS_PER_PHASE[1])] + \
+                          ['Wind speed [m/s]']
+
+    X0_REAL_SCALE_DEFAULT = np.array([30, 20, 30*np.pi/180., 170])
+    X0_REAL_SCALE_DEFAULT = np.hstack([X0_REAL_SCALE_DEFAULT, np.ones(N_POINTS_PER_PHASE[0])*2000,
+                                       np.ones(N_POINTS_PER_PHASE[1])*1500, np.ones(N_POINTS_PER_PHASE[0])*4,
+                                       np.ones(N_POINTS_PER_PHASE[1])*1.5, [8]])
+    SCALING_X_DEFAULT = np.array([1e-2, 1e-2, 1, 1e-3])
+    SCALING_X_DEFAULT = np.hstack([SCALING_X_DEFAULT, np.ones(np.sum(N_POINTS_PER_PHASE))*1e-4,
+                                   np.ones(np.sum(N_POINTS_PER_PHASE)), [1e-1]])
+    BOUNDS_REAL_SCALE_DEFAULT = np.array([
+        [1, 500],
+        [20, 300],
+        [25*np.pi/180, 70.*np.pi/180.],
+        [100, np.inf],
+    ])
+    BOUNDS_REAL_SCALE_DEFAULT = np.append(BOUNDS_REAL_SCALE_DEFAULT, np.empty((np.sum(N_POINTS_PER_PHASE), 2))*np.nan, axis=0)
+    BOUNDS_REAL_SCALE_DEFAULT = np.append(BOUNDS_REAL_SCALE_DEFAULT, np.array([[0, 15]] * np.sum(N_POINTS_PER_PHASE)), axis=0)
+    BOUNDS_REAL_SCALE_DEFAULT = np.append(BOUNDS_REAL_SCALE_DEFAULT, np.array([[3, 35]]), axis=0)
+    N_INEQ_CONS = 1 + np.sum(N_POINTS_PER_PHASE)*3 + N_POINTS_PER_PHASE[1]
+    N_EQ_CONS = 1 + np.sum(N_POINTS_PER_PHASE)
+
+    def __init__(self, system_properties, environment_state, cut='out', obj_mcp_factor=0):
+        # Initiate attributes of parent class.
+        bounds = self.BOUNDS_REAL_SCALE_DEFAULT.copy()
+        bounds[4:4+np.sum(self.N_POINTS_PER_PHASE), :] = [system_properties.tether_force_min_limit, system_properties.tether_force_max_limit]
+        super().__init__(self.X0_REAL_SCALE_DEFAULT.copy(), bounds, self.SCALING_X_DEFAULT.copy(), self.N_INEQ_CONS,
+                         self.N_EQ_CONS, system_properties, environment_state)
+        self.cut = cut
+        self.obj_mcp_factor = obj_mcp_factor
+
+    def eval_fun(self, x, scale_x=True, relax_errors=True):
+        """Method calculating the objective and constraint functions from the eval_performance_indicators method output.
+        """
+        # Convert the optimization vector to real scale values and perform simulation.
+        if scale_x:
+            x_real_scale = x/self.scaling_x
         else:
-            ineq_cons_cw_patterns = 0.  # Constraint set to 0 does not affect the optimization.
+            x_real_scale = x
+        duration_out = x_real_scale[0]
+        tether_length_end = x_real_scale[3]
+        forces_out = x_real_scale[4:4+self.N_POINTS_PER_PHASE[0]]
+        forces_in = x_real_scale[4+self.N_POINTS_PER_PHASE[0]:4+np.sum(self.N_POINTS_PER_PHASE)]
+        kappas_out = x_real_scale[4+np.sum(self.N_POINTS_PER_PHASE):
+                                  4+np.sum(self.N_POINTS_PER_PHASE)+self.N_POINTS_PER_PHASE[0]]
+        kappas_in = x_real_scale[4+np.sum(self.N_POINTS_PER_PHASE)+self.N_POINTS_PER_PHASE[0]:
+                                 4+2*np.sum(self.N_POINTS_PER_PHASE)]
+        wind_speed = x_real_scale[-1]
 
-        ineq_cons = np.array([force_out_setpoint_min, force_in_setpoint_max, ineq_cons_traction_max_force,
-                              ineq_cons_cw_patterns])
+        cycle = OptCycle(self.system_properties, self.environment_state)
+        cycle.n_points_per_phase = self.N_POINTS_PER_PHASE
+        cycle_res = cycle.run_simulation(*x_real_scale[:4], forces_out, forces_in, kappas_out, kappas_in,
+                                         relax_errors=True, wind_speed=wind_speed)
+        if not relax_errors:
+            return cycle_res
 
-        return obj, ineq_cons
+        if self.cut == 'in':
+            sign = 1
+        else:
+            sign = -1
+        obj = sign * wind_speed*1e-2 - self.obj_mcp_factor*cycle_res['mean_cycle_power']*1e-5
 
-    def eval_performance_indicators(self, x_real_scale, plot_result=False, relax_errors=True):
-        """Method running the simulation and returning the performance indicators needed to calculate the objective and
-        constraint functions."""
-        # Map the optimization vector to the separate variables.
-        tether_force_traction, tether_force_retraction, elevation_angle_traction, tether_length_diff, \
-        tether_length_min = x_real_scale
+        eq_cons = np.hstack([[cycle_res['tether_length_end']-tether_length_end],
+                             cycle_res['out']['lift_to_drag_errors'], cycle_res['in']['lift_to_drag_errors']])
 
-        # Configure the cycle settings and run simulation.
-        self.cycle_settings['cycle']['elevation_angle_traction'] = elevation_angle_traction
-        self.cycle_settings['cycle']['tether_length_start_retraction'] = tether_length_min + tether_length_diff
-        self.cycle_settings['cycle']['tether_length_end_retraction'] = tether_length_min
+        # The maximum reel-out tether force can be exceeded when the tether force control is overruled by the maximum
+        # reel-out speed limit and the imposed reel-out speed yields a tether force exceeding its set point. This
+        # scenario is prevented by the lower constraint.
+        speed_min_limit = self.system_properties.reeling_speed_min_limit
+        speed_max_limit = self.system_properties.reeling_speed_max_limit
 
-        self.cycle_settings['retraction']['control'] = ('tether_force_ground', tether_force_retraction)
-        self.cycle_settings['transition']['control'] = ('reeling_speed', 0.)
-        self.cycle_settings['traction']['control'] = ('tether_force_ground', tether_force_traction)
+        ineq_cons = [cycle_res['mean_cycle_power']*1e-4]
+        for i in range(self.N_POINTS_PER_PHASE[1]-1):
+            ineq_cons.append(forces_in[i]-forces_in[i+1])
+        for i in range(self.N_POINTS_PER_PHASE[0]):
+            speed_violation_traction = cycle_res['out']['reeling_speeds'][i] - speed_min_limit
+            ineq_cons.append(speed_violation_traction / speed_max_limit)
+            speed_violation_traction = cycle_res['out']['reeling_speeds'][i] - speed_max_limit
+            ineq_cons.append(-speed_violation_traction / speed_max_limit)
+        for i in range(self.N_POINTS_PER_PHASE[1]):
+            # speed_violation_retraction = -cycle_res['in']['reeling_speeds'][i] - speed_min_limit
+            # ineq_cons.append(speed_violation_retraction / speed_max_limit)
+            # ineq_cons.append(-cycle_res['in']['reeling_speeds'][i])
+            speed_violation_retraction = -cycle_res['in']['reeling_speeds'][i] - speed_max_limit
+            ineq_cons.append(-speed_violation_retraction / speed_max_limit)
+        for v_tau in cycle_res['out']['tangential_speeds']:
+            pattern_duration = 300/v_tau
+            ineq_cons.append(duration_out/pattern_duration - 1)
+        ineq_cons += cycle_res['in']['tangential_speed_factors']
+        ineq_cons += [cycle_res['out']['kite_positions'][0].z - 100]
+        ineq_cons += [500 - kp.z for kp in cycle_res['in']['kite_positions']]
 
-        cycle = Cycle(self.cycle_settings)
-        iterative_procedure_config = {
-            'enable_steady_state_errors': not relax_errors,
-        }
-        cycle.run_simulation(self.system_properties, self.environment_state, iterative_procedure_config,
-                             not relax_errors)
-
-        if plot_result:  # Plot the simulation results.
-            cycle.trajectory_plot(steady_state_markers=True)
-            phase_switch_points = [cycle.transition_phase.time[0], cycle.traction_phase.time[0]]
-            cycle.time_plot(['straight_tether_length', 'reeling_speed', 'tether_force_ground', 'power_ground'],
-                            plot_markers=phase_switch_points)
-
-        res = {
-            'average_power': {
-                'cycle': cycle.average_power,
-                'in': cycle.retraction_phase.average_power,
-                'trans': cycle.transition_phase.average_power,
-                'out': cycle.traction_phase.average_power,
-            },
-            'min_tether_force': {
-                'in': cycle.retraction_phase.min_tether_force,
-                'trans': cycle.transition_phase.min_tether_force,
-                'out': cycle.traction_phase.min_tether_force,
-            },
-            'max_tether_force': {
-                'in': cycle.retraction_phase.max_tether_force,
-                'trans': cycle.transition_phase.max_tether_force,
-                'out': cycle.traction_phase.max_tether_force,
-            },
-            'min_reeling_speed': {
-                'in': cycle.retraction_phase.min_reeling_speed,
-                'out': cycle.traction_phase.min_reeling_speed,
-            },
-            'max_reeling_speed': {
-                'in': cycle.retraction_phase.max_reeling_speed,
-                'out': cycle.traction_phase.max_reeling_speed,
-            },
-            'n_crosswind_patterns': getattr(cycle.traction_phase, 'n_crosswind_patterns', None),
-            'min_height': min([cycle.traction_phase.kinematics[0].z, cycle.traction_phase.kinematics[-1].z]),
-            'max_elevation_angle': cycle.transition_phase.kinematics[0].elevation_angle,
-            'duration': {
-                'cycle': cycle.duration,
-                'in': cycle.retraction_phase.duration,
-                'trans': cycle.transition_phase.duration,
-                'out': cycle.traction_phase.duration,
-            },
-            'duty_cycle': cycle.duty_cycle,
-            'pumping_efficiency': cycle.pumping_efficiency,
-            'kinematics': cycle.kinematics,
-        }
-        return res
+        return obj, np.hstack([eq_cons, np.array(ineq_cons)])
 
 
-def test():
-    from qsm import LogProfile, TractionPhaseHybrid
-    from kitepower_kites import sys_props_v3
+def eval_limit(wind_speeds=[22, 22.5, 22.7, 22.9], cut=None, env_state=LogProfile()):
+    from kitev3_10mm_tether import sys_props_v3
 
-    env_state = LogProfile()
-    env_state.set_reference_wind_speed(12.)
+    fig, ax = plt.subplots(5, 1)
+    ax_traj = plt.figure().gca()
+    plt.axis('equal')
+    plt.plot(150*np.cos(np.linspace(0, np.pi/2, 15)), 150*np.sin(np.linspace(0, np.pi/2, 15)), ':', color='grey')
 
-    cycle_sim_settings = {
-        'cycle': {
-            'traction_phase': TractionPhaseHybrid,
-            'include_transition_energy': False,
-        },
-        'retraction': {},
-        'transition': {
-            'time_step': 0.25,
-        },
-        'traction': {
-            'azimuth_angle': 13 * np.pi / 180.,
-            'course_angle': 100 * np.pi / 180.,
-        },
-    }
-    oc = OptimizerCycle(cycle_sim_settings, sys_props_v3, env_state, reduce_x=np.array([0, 1, 2, 3]))
-    oc.x0_real_scale = np.array([4500, 1000, 30*np.pi/180., 150, 230])
-    print(oc.optimize())
-    oc.eval_point(True)
+    mcps, success = [], []
+    opt_vars = np.empty((0, 4))
+    for i, v in enumerate(wind_speeds):
+        print("Wind speed = {:.1f} m/s".format(v))
+        env_state.set_reference_wind_speed(v)
+        oc = OptimizerCycleKappa(sys_props_v3, env_state)
+        if i > 0:
+            oc.x0_real_scale = x_opt
+        oc.optimize(maxiter=100)
+        x_opt = oc.x_opt_real_scale
+        print("x_opt = ", x_opt)
+        cycle_res = oc.eval_point()
+        opt_vars = np.vstack((opt_vars, [oc.x_opt_real_scale[:4]]))
+        mcps.append(cycle_res['mean_cycle_power'])
+        success.append(oc.op_res['success'])
+
+        cons = oc.eval_point(relax_errors=True)[1]
+        print("Max. abs. equality constraints:", np.max(np.abs(cons[:oc.N_EQ_CONS])))
+        print("Min. inequality constraint:", np.min(cons[oc.N_EQ_CONS:]))
+        if not oc.op_res['success']:
+            plt.figure()
+            plt.bar(range(oc.N_EQ_CONS), cons[:oc.N_EQ_CONS])
+            plt.xticks(range(oc.N_EQ_CONS), oc.EQ_CONS_LABELS, rotation='vertical')
+
+        plot_sol(cycle_res, i, ax, ax_traj)
+
+    # if cut is not None:
+    if cut == 'in':
+        factors = [0.]
+    elif cut == 'out':
+        factors = [.5, .25, 0]
+    else:
+        factors = []
+    for f in factors:
+        i += 1
+        oc = OptimizerCycleCutKappa(sys_props_v3, env_state, cut, f)
+        oc.x0_real_scale = np.hstack([x_opt, v])
+        x_opt_cut = oc.optimize(maxiter=100)
+
+        ax_x = plt.subplots(2, 2)[1].reshape(-1)
+        for a, x, bnds, lbl in zip(ax_x, x_opt_cut, oc.bounds_real_scale, oc.OPT_VARIABLE_LABELS):
+            a.axhline(bnds[0], ls='--', color='C3')
+            a.axhline(bnds[1], ls='--', color='C3')
+            a.bar(0, x)
+            a.xaxis.set_visible(False)
+            a.set_ylabel(lbl)
+
+        cons = oc.eval_point(relax_errors=True)[1]
+        print("Max. abs. equality constraints:", np.max(np.abs(cons[:oc.N_EQ_CONS])))
+        print("Equality constraints:", cons[:oc.N_EQ_CONS])
+        print("Min. inequality constraint:", np.min(cons[oc.N_EQ_CONS:]))
+        print("Inequality constraints:", cons[oc.N_EQ_CONS:])
+        print("x_opt = ", x_opt_cut)
+        print("Minimum wind speed @ 100 m = {:.2f} m/s".format(x_opt_cut[-1]))
+        env_state.calculate(10)
+        print("Minimum wind speed @ 10 m = {:.2f} m/s".format(env_state.wind_speed))
+        env_state.set_reference_wind_speed(x_opt_cut[-1])
+        cycle_res = oc.eval_point()
+        print("Mean cycle power = {:.2f}".format(cycle_res['mean_cycle_power']))
+        print("Optimization successful = ", oc.op_res['success'])
+
+        plot_sol(cycle_res, i, ax, ax_traj, ls='--')
+
+        opt_vars = np.vstack((opt_vars, [oc.x_opt_real_scale[:4]]))
+        wind_speeds = np.append(wind_speeds, x_opt_cut[-1])
+        mcps.append(cycle_res['mean_cycle_power'])
+        success.append(oc.op_res['success'])
+
+    fig, ax = plt.subplots(5, 1, sharex=True)
+    ax[0].plot(wind_speeds, mcps, '.-')
+    ax[1].plot(wind_speeds, opt_vars[:, 0])
+    ax[1].set_ylabel('Duration reel-out [s]')
+    ax[2].plot(wind_speeds, opt_vars[:, 1])
+    ax[2].set_ylabel('Duration reel-in [s]')
+    ax[3].plot(wind_speeds, opt_vars[:, 2]*180./np.pi)
+    ax[3].set_ylabel('Elevation angle [deg]')
+    ax[4].plot(wind_speeds, opt_vars[:, 3])
+    ax[4].set_ylabel('Min. tether length [m]')
+    try:
+        wind_speeds_x, mcps_x = zip(*[(v, mcp) for v, mcp, s in zip(wind_speeds, mcps, success) if not s])
+        ax[0].plot(wind_speeds_x, mcps_x, 'x')
+    except ValueError:
+        pass
+
     plt.show()
 
 
+def find_cut_speed(x0=None, cut='out', env_state=LogProfile(), maxiter=100):
+    from kitev3_10mm_tether import sys_props_v3
+
+    fig, ax = plt.subplots(5, 1)
+    ax_traj = plt.figure().gca()
+    plt.axis('equal')
+    plt.plot(150*np.cos(np.linspace(0, np.pi/2, 15)), 150*np.sin(np.linspace(0, np.pi/2, 15)), ':', color='grey')
+
+    oc = OptimizerCycleCutKappa(sys_props_v3, env_state, cut)
+    if x0 is not None:
+        oc.x0_real_scale = x0
+    x_opt = oc.optimize(maxiter=maxiter)
+
+    ax_x = plt.subplots(2, 2)[1].reshape(-1)
+    for a, x, bnds, lbl in zip(ax_x, x_opt, oc.bounds_real_scale, oc.OPT_VARIABLE_LABELS):
+        a.axhline(bnds[0], ls='--', color='C3')
+        a.axhline(bnds[1], ls='--', color='C3')
+        a.bar(0, x)
+        a.xaxis.set_visible(False)
+        a.set_ylabel(lbl)
+
+    cons = oc.eval_point(relax_errors=True)[1]
+    print("Max. abs. equality constraints:", np.max(np.abs(cons[:oc.N_EQ_CONS])))
+    print("Equality constraints:", cons[:oc.N_EQ_CONS])
+    print("Min. inequality constraint:", np.min(cons[oc.N_EQ_CONS:]))
+    print("Inequality constraints:", cons[oc.N_EQ_CONS:])
+    print("x_opt = ", x_opt)
+    print("Minimum wind speed @ 100 m = {:.2f} m/s".format(x_opt[-1]))
+    env_state.calculate(10)
+    print("Minimum wind speed @ 10 m = {:.2f} m/s".format(env_state.wind_speed))
+    env_state.set_reference_wind_speed(x_opt[-1])
+    cycle_res = oc.eval_point()
+    print("Mean cycle power = {:.2f}".format(cycle_res['mean_cycle_power']))
+    print("Optimization successful = ", oc.op_res['success'])
+
+    plot_sol(cycle_res, 0, ax, ax_traj)
+
+
+def plot_sol(cycle_res, i, ax, ax_traj, ls='.-'):
+    ax[0].plot(cycle_res['out']['time'], [ss.tether_force_ground for ss in cycle_res['out']['steady_states']], '.-', color='C{}'.format(i))
+    ax[0].plot(cycle_res['in']['time'], [ss.tether_force_ground for ss in cycle_res['in']['steady_states']], '.-', color='C{}'.format(i))
+    ax[0].set_ylabel('Tether\nforce [N]')
+    ax[1].plot(cycle_res['out']['time'], [ss.reeling_speed for ss in cycle_res['out']['steady_states']], '.-', color='C{}'.format(i))
+    ax[1].plot(cycle_res['in']['time'], [ss.reeling_speed for ss in cycle_res['in']['steady_states']], '.-', color='C{}'.format(i))
+    ax[1].set_ylabel('Reeling\nspeed [m/s]')
+    ax[2].plot(cycle_res['out']['time'], [kp.straight_tether_length for kp in cycle_res['out']['kite_positions']], '.-', color='C{}'.format(i))
+    ax[2].plot(cycle_res['in']['time'], [kp.straight_tether_length for kp in cycle_res['in']['kite_positions']], '.-', color='C{}'.format(i))
+    ax[2].plot(cycle_res['in']['time'][-1], cycle_res['out']['kite_positions'][0].straight_tether_length, 's', ms=6, mfc='None', color='C{}'.format(i))
+    ax[2].set_ylabel('Tether\nlength [m]')
+    ax[3].plot(cycle_res['out']['time'], [ss.kite_tangential_speed for ss in cycle_res['out']['steady_states']], '.-', color='C{}'.format(i))
+    ax[3].plot(cycle_res['in']['time'], [ss.kite_tangential_speed for ss in cycle_res['in']['steady_states']], '.-', color='C{}'.format(i))
+    ax[3].set_ylabel('Tangential\nspeed [m/s]')
+    ax[4].plot(cycle_res['out']['time'], [ss.kinematic_ratio for ss in cycle_res['out']['steady_states']], '.-', color='C{}'.format(i))
+    ax[4].plot(cycle_res['in']['time'], [ss.kinematic_ratio for ss in cycle_res['in']['steady_states']], '.-', color='C{}'.format(i))
+    ax[4].set_ylabel('Kinematic\nratio [-]')
+    ax[-1].set_xlabel('Time [s]')
+
+    ax_traj.plot([kp.x for kp in cycle_res['out']['kite_positions']], [kp.z for kp in cycle_res['out']['kite_positions']], ls, color='C{}'.format(i), mfc='None')
+    ax_traj.plot([kp.x for kp in cycle_res['in']['kite_positions']], [kp.z for kp in cycle_res['in']['kite_positions']], ls, color='C{}'.format(i), mfc='None')
+
+
+def construct_power_curve(starting_wind_speed=9., wind_speed_step=[.2, .5], power_optimization_limits=[6, 22], env_state=LogProfile(), maxiter=300):
+    from kitev3_10mm_tether import sys_props_v3
+    cut = True
+    plot_nth_step = 3
+
+    ax_pc = plt.figure().gca()
+    ax_vars = plt.subplots(4, 1, sharex=True)[1]
+
+    fig, ax = plt.subplots(5, 1)
+    ax_profile, ax_traj = plt.subplots(1, 2, sharey=True)[1]
+    env_state.set_reference_wind_speed(1)
+    env_state.plot_wind_profile(ax_profile)
+    ax_traj.set_aspect('equal')
+    ax_traj.plot(150*np.cos(np.linspace(0, np.pi/2, 15)), 150*np.sin(np.linspace(0, np.pi/2, 15)), ':', color='grey')
+
+    mcps_low, success_low, wind_speeds_low = [], [], []
+    opt_vars = np.empty((0, 4))
+    success_counter = 0
+    v = starting_wind_speed
+    while True:
+        print("Wind speed = {:.1f} m/s".format(v))
+        env_state.set_reference_wind_speed(v)
+        oc = OptimizerCycleKappa(sys_props_v3, env_state)
+        if success_counter == 0:
+            oc.optimize(maxiter=300)
+        else:
+            oc.x0_real_scale = x0_next
+            oc.optimize(maxiter=maxiter)
+
+        if oc.op_res['success']:  # or oc.op_res.get('exit_mode', -1) == 9:
+            x0_next = oc.x_opt_real_scale
+            v0_cut_in = v
+            if success_counter == 0:
+                x0_start = x0_next
+            cycle_res = oc.eval_point()
+        else:
+            try:
+                cycle_res = oc.eval_point()
+            except:
+                cycle_res = {}
+
+        opt_vars = np.vstack((opt_vars, [oc.x_opt_real_scale[:4]]))
+        mcps_low.append(cycle_res['mean_cycle_power'])
+        success_low.append(oc.op_res['success'])
+        wind_speeds_low.append(v)
+
+        cons = oc.eval_point(relax_errors=True)[1]
+        print("Max. abs. equality constraints:", np.max(np.abs(cons[:oc.N_EQ_CONS])))
+        print("Min. inequality constraint:", np.min(cons[oc.N_EQ_CONS:]))
+        # plt.figure()
+        # plt.bar(range(oc.N_INEQ_CONS), cons[oc.N_EQ_CONS:])
+        # plt.xticks(range(oc.N_INEQ_CONS), oc.INEQ_CONS_LABELS, rotation='vertical')
+        # if not oc.op_res['success']:
+        #     plt.figure()
+        #     plt.bar(range(oc.N_EQ_CONS), cons[:oc.N_EQ_CONS])
+        #     plt.xticks(range(oc.N_EQ_CONS), oc.EQ_CONS_LABELS, rotation='vertical')
+
+        if oc.op_res['success']:
+            if success_counter == 0:
+                plot_sol(cycle_res, success_counter, ax, ax_traj, '-s')
+                ax_pc.plot(v, cycle_res['mean_cycle_power'], 's', color='C{}'.format(success_counter), mfc='None')
+                for a, x in zip(ax_vars, oc.x_opt_real_scale[:4]*np.array([1, 1, 180./np.pi, 1])): a.plot(v, x, 's', color='C{}'.format(success_counter), mfc='None')
+            elif success_counter % plot_nth_step == 0 or v < 6.:
+                plot_sol(cycle_res, success_counter, ax, ax_traj)
+                ax_pc.plot(v, cycle_res['mean_cycle_power'], 's', color='C{}'.format(success_counter), mfc='None')
+                for a, x in zip(ax_vars, oc.x_opt_real_scale[:4]*np.array([1, 1, 180./np.pi, 1])): a.plot(v, x, 's', color='C{}'.format(success_counter), mfc='None')
+            success_counter += 1
+
+        if not oc.op_res['success'] and v < power_optimization_limits[0]:
+            break
+        v -= wind_speed_step[0]
+
+    if cut:
+        # Cut-in
+        oc = OptimizerCycleCutKappa(sys_props_v3, env_state, 'in')
+        oc.x0_real_scale = np.hstack([x0_next, v0_cut_in])
+        x_opt = oc.optimize(maxiter=maxiter)
+
+        cons = oc.eval_point(relax_errors=True)[1]
+        print("Max. abs. equality constraints:", np.max(np.abs(cons[:oc.N_EQ_CONS])))
+        print("Equality constraints:", cons[:oc.N_EQ_CONS])
+        print("Min. inequality constraint:", np.min(cons[oc.N_EQ_CONS:]))
+        print("Inequality constraints:", cons[oc.N_EQ_CONS:])
+        print("Minimum wind speed @ 100 m = {:.2f} m/s".format(x_opt[-1]))
+        env_state.calculate(10)
+        print("Minimum wind speed @ 10 m = {:.2f} m/s".format(env_state.wind_speed))
+        env_state.set_reference_wind_speed(x_opt[-1])
+        cycle_res = oc.eval_point()
+        print("Mean cycle power = {:.2f}".format(cycle_res['mean_cycle_power']))
+        plot_sol(cycle_res, success_counter, ax, ax_traj, ls='--.')
+        ax_pc.plot(x_opt[-1], cycle_res['mean_cycle_power'], 's', color='C{}'.format(success_counter), mfc='None')
+        for a, x in zip(ax_vars, x_opt[:4]*np.array([1, 1, 180./np.pi, 1])): a.plot(x_opt[-1], x, 's', color='C{}'.format(success_counter), mfc='None')
+        success_counter += 1
+
+        opt_vars = np.vstack((opt_vars, [oc.x_opt_real_scale[:4]]))
+        mcps_low.append(cycle_res['mean_cycle_power'])
+        success_low.append(oc.op_res['success'])
+        wind_speeds_low.append(x_opt[-1])
+
+    opt_vars = opt_vars[::-1, :]
+
+    # High
+    mcps_high, success_high, wind_speeds_high = [], [], []
+    success_counter += 1
+    v = starting_wind_speed + wind_speed_step[1]
+    while True:
+        print("Wind speed = {:.1f} m/s".format(v))
+        env_state.set_reference_wind_speed(v)
+        oc = OptimizerCycleKappa(sys_props_v3, env_state)
+        if not mcps_high:
+            oc.x0_real_scale = x0_start
+        else:
+            oc.x0_real_scale = x0_next
+        oc.optimize(maxiter=maxiter)
+
+        if oc.op_res['success']:  # or oc.op_res.get('exit_mode', -1) == 9:
+            x0_next = oc.x_opt_real_scale
+            v0_cut_out = v
+            print("x_opt = ", x0_next)
+            cycle_res = oc.eval_point()
+        else:
+            try:
+                cycle_res = oc.eval_point()
+            except:
+                cycle_res = {}
+
+        opt_vars = np.vstack((opt_vars, [oc.x_opt_real_scale[:4]]))
+        mcps_high.append(cycle_res.get('mean_cycle_power', np.nan))
+        success_high.append(oc.op_res['success'])
+        wind_speeds_high.append(v)
+
+        cons = oc.eval_point(relax_errors=True)[1]
+        print("Max. abs. equality constraints:", np.max(np.abs(cons[:oc.N_EQ_CONS])))
+        print("Min. inequality constraint:", np.min(cons[oc.N_EQ_CONS:]))
+        # plt.figure()
+        # plt.bar(range(oc.N_INEQ_CONS), cons[oc.N_EQ_CONS:])
+        # plt.xticks(range(oc.N_INEQ_CONS), oc.INEQ_CONS_LABELS, rotation='vertical')
+        # if not oc.op_res['success']:
+        #     plt.figure()
+        #     plt.bar(range(oc.N_EQ_CONS), cons[:oc.N_EQ_CONS])
+        #     plt.xticks(range(oc.N_EQ_CONS), oc.EQ_CONS_LABELS, rotation='vertical')
+
+        if oc.op_res['success']:
+            if success_counter % plot_nth_step == 0:
+                plot_sol(cycle_res, success_counter, ax, ax_traj)
+                ax_pc.plot(v, cycle_res['mean_cycle_power'], 's', color='C{}'.format(success_counter), mfc='None')
+                for a, x in zip(ax_vars, oc.x_opt_real_scale[:4]*np.array([1, 1, 180./np.pi, 1])): a.plot(v, x, 's', color='C{}'.format(success_counter), mfc='None')
+            success_counter += 1
+
+        if not oc.op_res['success'] and v > power_optimization_limits[1]:
+            break
+        v += wind_speed_step[1]
+
+    if cut:
+        # Cut-out
+        for f in [.5, .1, 0]:
+            oc = OptimizerCycleCutKappa(sys_props_v3, env_state, 'out', f)
+            oc.x0_real_scale = np.hstack([x0_next, v0_cut_out])
+            oc.optimize(maxiter=maxiter)
+
+            cons = oc.eval_point(relax_errors=True)[1]
+            print("Max. abs. equality constraints:", np.max(np.abs(cons[:oc.N_EQ_CONS])))
+            print("Equality constraints:", cons[:oc.N_EQ_CONS])
+            print("Min. inequality constraint:", np.min(cons[oc.N_EQ_CONS:]))
+            print("Inequality constraints:", cons[oc.N_EQ_CONS:])
+            print("Minimum wind speed @ 100 m = {:.2f} m/s".format(oc.x_opt_real_scale[-1]))
+            env_state.calculate(10)
+            print("Minimum wind speed @ 10 m = {:.2f} m/s".format(env_state.wind_speed))
+            env_state.set_reference_wind_speed(oc.x_opt_real_scale[-1])
+            cycle_res = oc.eval_point()
+            print("Mean cycle power = {:.2f}".format(cycle_res['mean_cycle_power']))
+            plot_sol(cycle_res, success_counter, ax, ax_traj, '--.')
+            ax_pc.plot(oc.x_opt_real_scale[-1], cycle_res['mean_cycle_power'], 's', color='C{}'.format(success_counter), mfc='None')
+            for a, x in zip(ax_vars, oc.x_opt_real_scale[:4]*np.array([1, 1, 180./np.pi, 1])): a.plot(oc.x_opt_real_scale[-1], x, 's', color='C{}'.format(success_counter), mfc='None')
+            success_counter += 1
+
+            opt_vars = np.vstack((opt_vars, [oc.x_opt_real_scale[:4]]))
+            mcps_high.append(cycle_res['mean_cycle_power'])
+            success_high.append(oc.op_res['success'])
+            wind_speeds_high.append(oc.x_opt_real_scale[-1])
+
+    #Power curve
+    mcps = mcps_low[::-1] + mcps_high
+    success = success_low[::-1] + success_high
+    wind_speeds = wind_speeds_low[::-1] + wind_speeds_high
+
+    wind_speeds_s, mcps_s = zip(*[(v, mcp) for v, mcp, s in zip(wind_speeds, mcps, success) if s])
+    ax_pc.plot(wind_speeds_s, mcps_s, '.-')
+    ax_pc.plot(wind_speeds, mcps)
+
+    wind_speeds = np.array(wind_speeds)
+    success = np.array(success)
+    ax_pc.plot(wind_speeds[~success], [0]*np.sum(~success), 'x')
+    ax_pc.set_ylim([0, 1e4])
+
+    ax_vars[0].plot(wind_speeds, opt_vars[:, 0], '.-')
+    ax_vars[0].plot(wind_speeds[~success], opt_vars[~success, 0], 'x')
+    ax_vars[0].set_ylabel('Duration\nreel-out [s]')
+    ax_vars[1].plot(wind_speeds, opt_vars[:, 1], '.-')
+    ax_vars[1].plot(wind_speeds[~success], opt_vars[~success, 1], 'x')
+    ax_vars[1].set_ylabel('Duration\nreel-in [s]')
+    ax_vars[2].plot(wind_speeds, opt_vars[:, 2] * 180. / np.pi, '.-')
+    ax_vars[2].plot(wind_speeds[~success], opt_vars[~success, 2] * 180. / np.pi, 'x')
+    ax_vars[2].set_ylabel('Elevation\nangle [deg]')
+    ax_vars[3].plot(wind_speeds, opt_vars[:, 3], '.-')
+    ax_vars[3].plot(wind_speeds[~success], opt_vars[~success, 3], 'x')
+    ax_vars[3].set_ylabel('Min. tether\nlength [m]')
+
+
 if __name__ == "__main__":
-    test()
+    # env_state = LogProfile()
+    env_state = NormalisedWindTable1D()
+    h = [10., 20., 40., 60., 80., 100., 120., 140., 150., 160., 180., 200., 220., 250., 300., 500., 600.]
+    v = [0.31916794, 0.38611869, 0.55029902, 0.65804212, 0.73519261, 0.79609015,
+         0.84480401, 0.88139352, 0.89594957, 0.90781971, 0.92918228, 0.94297737,
+         0.95193377, 0.9588552, 0.95571666, 0.88390919, 0.84849594]
+    env_state.heights = h
+    env_state.h_ref = h[np.argmax(v)]
+    env_state.normalised_wind_speeds = v / np.amax(v)
+
+    # find_cut_speed(x0=[1.13764272e+02, 6.08751315e+01, 9.48468048e-01, 2.49842316e+02,
+    #                    5.00000000e+03, 5.00000000e+03, 5.00000000e+03, 2.90299356e+03,
+    #                    5.00000000e+03, 5.00000000e+03, 5.00000000e+03, 5.00000000e+03,
+    #                    5.00000000e+03, 2.81732604e+03, 2.57137223e+03, 2.57137223e+03,
+    #                    2.57137223e+03, 2.57137223e+03, 2.57137223e+03, 2.95622546e+00,
+    #                    2.70502689e+00, 2.53066712e+00, 2.15106589e+00, 2.29456606e+00,
+    #                    1.62580871e+00, 1.70031843e+00, 1.79227046e+00, 1.90501750e+00,
+    #                    1.99054171e+00, 2.08459706e+00, 2.18167218e+00, 2.28132096e+00,
+    #                    2.38136934e+00, 2.47913410e+00, 2.28599887e+01], env_state=env_state)
+    # # Log profile
+    # eval_limit(wind_speeds=[22, 22.5, 22.7, 22.9], cut='out')
+    # eval_limit(wind_speeds=[7, 6.5, 6.4], cut='in')
+    # eval_limit(wind_speeds=np.linspace(7, 22, 6))
+
+    # eval_limit(wind_speeds=[9, 8.5], cut='in')
+    # eval_limit(env_state=env_state, wind_speeds=np.arange(25, 26.5, .5), cut='out')
+    # eval_limit(env_state=LogProfile(), wind_speeds=np.arange(21, 23., .5), cut='out')
+
+    construct_power_curve()  #env_state=env_state, power_optimization_limits=[9, 26])
+    plt.show()
