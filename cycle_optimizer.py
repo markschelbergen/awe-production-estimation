@@ -1,3 +1,4 @@
+import pandas as pd
 from pyOpt import Optimization, SLSQP
 from scipy import optimize as op
 import numpy as np
@@ -11,7 +12,7 @@ class OptimizerError(Exception):
 
 
 n_points_reelin = 10
-
+dowa_heights = [10., 20., 40., 60., 80., 100., 120., 140., 150., 160., 180., 200., 220., 250., 300., 500., 600.]
 
 def read_slsqp_output_file(print_details=True):
     """Read relevant information from pyOpt's output file for the SLSQP algorithm."""
@@ -139,14 +140,12 @@ class Optimizer:
         if np.isnan(x).any():
             raise OptimizerError("Optimization vector contains NaN's.")
 
-        x_full = x
+        # bounds_adhered = (x - self.bounds_real_scale[:, 0]*self.scaling_x >= -1e6).all() and \
+        #                  (x - self.bounds_real_scale[:, 1]*self.scaling_x <= 1e6).all()
+        # if not bounds_adhered:
+        #     raise OptimizerError("Optimization bounds violated.")
 
-        bounds_adhered = (x_full - self.bounds_real_scale[:, 0]*self.scaling_x >= -1e6).all() and \
-                         (x_full - self.bounds_real_scale[:, 1]*self.scaling_x <= 1e6).all()
-        if not bounds_adhered:
-            raise OptimizerError("Optimization bounds violated.")
-
-        obj, cons = self.eval_fun(x_full, *args)
+        obj, cons = self.eval_fun(x, *args)
         return obj, [-c for c in cons], 0
 
     def obj_fun(self, x, *args):
@@ -181,7 +180,7 @@ class Optimizer:
             raise OptimizerError("Optimization vector contains nan's.")
         self.x_progress.append(x.copy())
 
-    def optimize(self, *args, maxiter=30, iprint=1):
+    def optimize(self, *args, maxiter=30, iprint=-1):
         """Perform optimization."""
         self.clear_result_attributes()
         # Construct scaled starting point and bounds
@@ -920,7 +919,17 @@ def test_convergence(starting_wind_speed=9., wind_speed_step=3., env_state=LogPr
     for a, x in zip(ax_vars, oc.x_opt_real_scale[:4] * np.array([1, 1, 180. / np.pi, 1])): a.plot(v, x, 's', color='C1', mfc='None')
 
 
-def construct_power_curve_test(wind_speed_step=1.5, power_optimization_limits=22, env_state=LogProfile(), maxiter=300):
+def record_opt_result(env_state, x_opt):
+    record = {}
+    for h in dowa_heights:
+        env_state.calculate(h)
+        record['vw{0:03.0f}'.format(h)] = env_state.wind_speed
+    for i, xi in enumerate(x_opt):
+        record['x{:02d}'.format(i)] = x_opt[i]
+    return pd.Series(record)
+
+
+def construct_power_curve_test(wind_speed_step=1., power_optimization_limits=22, env_state=LogProfile(), maxiter=300):
     from kitev3_10mm_tether import sys_props_v3
     cut = True
     plot_nth_step = 1
@@ -938,18 +947,12 @@ def construct_power_curve_test(wind_speed_step=1.5, power_optimization_limits=22
     opt_vars = np.empty((0, 4))
     success_counter = 0
     mcps, success, wind_speeds = [], [], []
-
-    # print("Starting wind speed = {:.1f} m/s".format(starting_wind_speed))
-    # env_state.set_reference_wind_speed(starting_wind_speed)
-    # oc = OptimizerCycleKappa(sys_props_v3, env_state)
-    # oc.optimize(maxiter=300)
-    # assert oc.op_res['success']
-    # x0_next = oc.x_opt_real_scale
+    succeeded_opts = pd.DataFrame()
 
     # Cut-in
     oc = OptimizerCycleCutKappa(sys_props_v3, env_state, 'in')
-    # oc.x0_real_scale = np.hstack([x0_next, starting_wind_speed])
     x_opt = oc.optimize(maxiter=maxiter)
+    assert oc.op_res['success'], "Cut-in optimization failed"
     x0_next = x_opt[:-1]
 
     cons = oc.eval_point(relax_errors=True)[1]
@@ -963,11 +966,14 @@ def construct_power_curve_test(wind_speed_step=1.5, power_optimization_limits=22
     env_state.set_reference_wind_speed(x_opt[-1])
     cycle_res = oc.eval_point()
     print("Mean cycle power = {:.2f}".format(cycle_res['mean_cycle_power']))
-    i_clr = success_counter // plot_nth_step
+    i_clr = 0
     plot_sol(cycle_res, i_clr, ax, ax_traj, ls='--.')
     ax_pc.plot(x_opt[-1], cycle_res['mean_cycle_power'], 's', color='C{}'.format(i_clr), mfc='None')
     for a, x in zip(ax_vars, x_opt[:4]*np.array([1, 1, 180./np.pi, 1])): a.plot(x_opt[-1], x, 's', color='C{}'.format(i_clr), mfc='None')
     success_counter += 1
+
+    record = record_opt_result(env_state, x_opt[:-1])
+    succeeded_opts = succeeded_opts.append(record, ignore_index=True)
 
     opt_vars = np.vstack((opt_vars, [oc.x_opt_real_scale[:4]]))
     mcps.append(cycle_res['mean_cycle_power'])
@@ -1000,6 +1006,9 @@ def construct_power_curve_test(wind_speed_step=1.5, power_optimization_limits=22
             v0_cut_out = v
             print("x_opt = ", x0_next)
             cycle_res = oc.eval_point()
+
+            record = record_opt_result(env_state, oc.x_opt_real_scale)
+            succeeded_opts = succeeded_opts.append(record, ignore_index=True)
         else:
             try:
                 cycle_res = oc.eval_point()
@@ -1062,6 +1071,9 @@ def construct_power_curve_test(wind_speed_step=1.5, power_optimization_limits=22
             mcps.append(cycle_res['mean_cycle_power'])
             success.append(oc.op_res['success'])
             wind_speeds.append(oc.x_opt_real_scale[-1])
+            if oc.op_res['success']:
+                record = record_opt_result(env_state, oc.x_opt_real_scale[:-1])
+                succeeded_opts = succeeded_opts.append(record, ignore_index=True)
 
     #Power curve
     wind_speeds_s, mcps_s = zip(*[(v, mcp) for v, mcp, s in zip(wind_speeds, mcps, success) if s])
@@ -1086,17 +1098,19 @@ def construct_power_curve_test(wind_speed_step=1.5, power_optimization_limits=22
     ax_vars[3].plot(wind_speeds[~success], opt_vars[~success, 3], 'x')
     ax_vars[3].set_ylabel('Min. tether\nlength [m]')
 
+    succeeded_opts.to_csv('opt_res_llj_profile.csv', index=False)
+
 
 if __name__ == "__main__":
     # env_state = LogProfile()
     env_state = NormalisedWindTable1D()
-    h = [10., 20., 40., 60., 80., 100., 120., 140., 150., 160., 180., 200., 220., 250., 300., 500., 600.]
-    v = [0.31916794, 0.38611869, 0.55029902, 0.65804212, 0.73519261, 0.79609015,
-         0.84480401, 0.88139352, 0.89594957, 0.90781971, 0.92918228, 0.94297737,
-         0.95193377, 0.9588552, 0.95571666, 0.88390919, 0.84849594]
-    env_state.heights = h
-    env_state.h_ref = h[np.argmax(v)]
-    env_state.normalised_wind_speeds = v / np.amax(v)
+    # h = [10., 20., 40., 60., 80., 100., 120., 140., 150., 160., 180., 200., 220., 250., 300., 500., 600.]
+    # v = [0.31916794, 0.38611869, 0.55029902, 0.65804212, 0.73519261, 0.79609015,
+    #      0.84480401, 0.88139352, 0.89594957, 0.90781971, 0.92918228, 0.94297737,
+    #      0.95193377, 0.9588552, 0.95571666, 0.88390919, 0.84849594]
+    # env_state.heights = h
+    # env_state.h_ref = h[np.argmax(v)]
+    # env_state.normalised_wind_speeds = v / np.amax(v)
 
     # find_cut_speed(x0=[1.13764272e+02, 6.08751315e+01, 9.48468048e-01, 2.49842316e+02,
     #                    5.00000000e+03, 5.00000000e+03, 5.00000000e+03, 2.90299356e+03,
@@ -1116,6 +1130,6 @@ if __name__ == "__main__":
     # eval_limit(env_state=env_state, wind_speeds=np.arange(25, 26.5, .5), cut='out')
     # eval_limit(env_state=LogProfile(), wind_speeds=np.arange(21, 23., .5), cut='out')
 
-    construct_power_curve_test()  #env_state=env_state, power_optimization_limits=[9, 26])
+    construct_power_curve_test(env_state=env_state, power_optimization_limits=26)  #[9, 26])
     # test_convergence()
     plt.show()

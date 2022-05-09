@@ -197,10 +197,12 @@ class NormalisedWindTable1D(EnvAtmosphericPressure):
     """
     def __init__(self):
         super().__init__(None)
-        self.wind_speed_ref = 8.
+        self.wind_speed_ref = 1.
         self.h_ref = 100.
-        self.heights = [10.0, 31.0, 53.9, 79.0, 106.5, 136.6, 169.5, 205.4, 244.7, 287.5, 334.2, 385.1, 440.6, 500.9]
-        self.normalised_wind_speeds = [0.88, 0.94, 0.97, 0.99, 1.0, 1.01, 1.02, 1.03, 1.03, 1.04, 1.04, 1.05, 1.05, 1.06]
+        self.heights = [10., 20., 40., 60., 80., 100., 120., 140., 150., 160., 180., 200., 220., 250., 300., 500., 600.]
+        self.normalised_wind_speeds = [0.33286354, 0.40268717, 0.57391254, 0.68627893, 0.76673997, 0.83025065,
+                                       0.88105483, 0.91921441, 0.93439507, 0.94677456, 0.9690538, 0.98344085,
+                                       0.99278157, 1., 0.99672678, 0.92183803, 0.88490519]
 
     def set_reference_height(self, h_ref):
         self.h_ref = h_ref
@@ -225,8 +227,10 @@ class NormalisedWindTable1D(EnvAtmosphericPressure):
         self.wind_speed = v
         return v
 
-    def plot_wind_profile(self, ax, label=None):
+    def plot_wind_profile(self, ax=None, label=None):
         """Plot the wind speed versus the height above ground."""
+        if ax is None:
+            ax = plt.figure().gca()
         wind_speeds = np.array(self.normalised_wind_speeds) * self.wind_speed_ref
         ax.plot(wind_speeds, self.heights, label=label)
         ax.set_xlabel('Wind speed [m s$^{-1}$]')
