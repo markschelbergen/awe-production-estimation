@@ -235,7 +235,9 @@ class NormalisedWindTable1D(EnvAtmosphericPressure):
         ax.plot(wind_speeds, self.heights, label=label)
         ax.set_xlabel('Wind speed [m s$^{-1}$]')
         ax.set_ylabel('Height [m]')
+        ax.set_xlim([0, None])
         ax.grid(True)
+        return ax
 
 
 class WindTable2D(EnvAtmosphericPressure):
