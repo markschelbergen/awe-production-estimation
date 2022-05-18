@@ -177,11 +177,13 @@ class LogProfile(EnvAtmosphericPressure):
 
     def plot_wind_profile(self, ax):
         """Plot the wind speed versus the height above ground."""
-        heights = [10., 20., 40., 60., 80., 100., 120., 140., 150., 160., 180., 200., 220., 250., 300., 500., 600.]
+        heights = [0, 1, 2, 5, 8, 10., 20., 40., 60., 80., 100., 120., 140., 150., 160., 180., 200., 220., 250., 300., 500., 600.]
         wind_speeds = [self.calculate_wind(h) for h in heights]
         ax.plot(wind_speeds, heights)
         ax.set_xlabel('Wind speed [m/s]')
         ax.set_ylabel('Height [m]')
+        ax.set_xlim([0, None])
+        ax.set_ylim([heights[0], heights[-1]])
         ax.grid(True)
 
 
@@ -1216,7 +1218,8 @@ class OptCycle:
 
         dt_in = duration_in/(self.n_points_per_phase[1]-1)
 
-        speeds_in, powers_in, lift_to_drag_errors_in, tangential_speed_factors_in = [], [], [], []
+        speeds_in, powers_in, lift_to_drag_errors_in = [], [], []
+        tangential_speeds_in, tangential_speed_factors_in = [], []
         tether_lengths_in, elevations_in = [], []
         steady_states_in, kite_positions_in = [], []
 
@@ -1253,6 +1256,7 @@ class OptCycle:
             powers_in.append(ss_in.power_ground)
             lift_to_drag_errors_in.append(ss_in.lift_to_drag_error)
             tangential_speed_factors_in.append(ss_in.tangential_speed_factor)
+            tangential_speeds_in.append(ss_in.kite_tangential_speed)
 
         # Note different integration technique used than trapz for reel-out
         # t = np.insert(np.cumsum(np.diff(tether_lengths_in) / np.array(speeds_in[:-1])), 0, 0)
@@ -1277,6 +1281,7 @@ class OptCycle:
                 'kite_positions': kite_positions_in,
                 'steady_states': steady_states_in,
                 'reeling_speeds': speeds_in,
+                'tangential_speeds': tangential_speeds_in,
                 'tangential_speed_factors': tangential_speed_factors_in,
                 'lift_to_drag_errors': lift_to_drag_errors_in,
             },
