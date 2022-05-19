@@ -33,9 +33,9 @@ def perform_opts(i_cluster):
     queue = pd.read_csv('wind_profiles_mmij_2008_cluster{}.csv'.format(i_cluster))
     n_records = queue.shape[0]
 
-    log = pd.read_csv('opt_res_log_profile.csv')
+    log = pd.read_csv('opt_res_log_profile.csv').loc[:, 'vw010':'x33']
     log.insert(0, 'id', np.mean(log.loc[:, 'vw010':'vw600'], axis=1).apply(lambda vw: 'log{:011.1f}'.format(vw)))
-    llj = pd.read_csv('opt_res_llj_profile.csv')
+    llj = pd.read_csv('opt_res_llj_profile.csv').loc[:, 'vw010':'x33']
     llj.insert(0, 'id', np.mean(llj.loc[:, 'vw010':'vw600'], axis=1).apply(lambda vw: 'llj{:011.1f}'.format(vw)))
     pool = pd.concat([log, llj])
 
@@ -126,6 +126,7 @@ def run_all():
 
 
 if __name__ == "__main__":
+    perform_opts(0)
     # divide_data_in_batches()
-    run_all()
+    # run_all()
     # print(cpu_count())

@@ -3,8 +3,10 @@ from pyOpt import Optimization, SLSQP
 from scipy import optimize as op
 import numpy as np
 import matplotlib.pyplot as plt
+from utils import add_panel_labels
 
 from qsm import OptCycle, LogProfile, NormalisedWindTable1D
+from kitev3_10mm_tether import sys_props_v3
 
 class OptimizerError(Exception):
     pass
@@ -483,8 +485,6 @@ class OptimizerCycleCutKappa(Optimizer):
 
 
 def eval_limit(wind_speeds=[22, 22.5, 22.7, 22.9], cut=None, env_state=LogProfile()):
-    from kitev3_10mm_tether import sys_props_v3
-
     fig, ax = plt.subplots(5, 1)
     ax_traj = plt.figure().gca()
     plt.axis('equal')
@@ -578,8 +578,6 @@ def eval_limit(wind_speeds=[22, 22.5, 22.7, 22.9], cut=None, env_state=LogProfil
 
 
 def find_cut_speed(x0=None, cut='out', env_state=LogProfile(), maxiter=100):
-    from kitev3_10mm_tether import sys_props_v3
-
     fig, ax = plt.subplots(5, 1)
     ax_traj = plt.figure().gca()
     plt.axis('equal')
@@ -649,8 +647,7 @@ def plot_sol(cycle_res, i, ax, ax_traj, ls='.-'):
     return traj
 
 
-def construct_power_curve(starting_wind_speed=9., wind_speed_step=[.2, .5], power_optimization_limits=[6, 22], env_state=LogProfile(), maxiter=300):
-    from kitev3_10mm_tether import sys_props_v3
+def construct_power_curve_start_middle(starting_wind_speed=9., wind_speed_step=[.2, .5], power_optimization_limits=[6, 22], env_state=LogProfile(), maxiter=300):
     cut = True
     plot_nth_step = 3
 
@@ -874,8 +871,6 @@ def construct_power_curve(starting_wind_speed=9., wind_speed_step=[.2, .5], powe
 
 
 def test_convergence(starting_wind_speed=9., wind_speed_step=3., env_state=LogProfile(), maxiter=300):
-    from kitev3_10mm_tether import sys_props_v3
-
     ax_pc = plt.figure().gca()
     ax_vars = plt.subplots(4, 1, sharex=True)[1]
 
@@ -926,23 +921,50 @@ def test_convergence(starting_wind_speed=9., wind_speed_step=3., env_state=LogPr
     for a, x in zip(ax_vars, oc.x_opt_real_scale[:4] * np.array([1, 1, 180. / np.pi, 1])): a.plot(v, x, 's', color='C1', mfc='None')
 
 
-def record_opt_result(env_state, x_opt):
+def record_opt_result(env_state, x_opt, cycle_res, eq_cons, ineq_cons):
+    assert len(x_opt) == 34
     record = {}
     for h in dowa_heights:
         env_state.calculate(h)
         record['vw{0:03.0f}'.format(h)] = env_state.wind_speed
     for i, xi in enumerate(x_opt):
         record['x{:02d}'.format(i)] = x_opt[i]
-    return pd.Series(record)
+
+    for i, hi in enumerate(eq_cons):
+        record['h{:03d}'.format(i)] = hi
+    for i, gi in enumerate(ineq_cons):
+        record['g{:03d}'.format(i)] = gi
+
+    record['mcp'] = cycle_res['mean_cycle_power']
+    record['max_height_ro'] = cycle_res['out']['kite_positions'][-1].z
+    record['min_height_ro'] = cycle_res['out']['kite_positions'][0].z
+    record['max_height_ri'] = max([kp.z for kp in cycle_res['in']['kite_positions']])
+
+    n_out, n_in = 5, 10
+    for i in range(n_out):
+        record['ro_speed{:02d}'.format(i)] = cycle_res['out']['reeling_speeds'][i]
+        record['ro_power{:02d}'.format(i)] = cycle_res['out']['steady_states'][i].power_ground
+        record['tan_speed_ro{:02d}'.format(i)] = cycle_res['out']['tangential_speeds'][i]
+        record['x_kite{:02d}'.format(i)] = cycle_res['out']['kite_positions'][i].x
+        record['z_kite{:02d}'.format(i)] = cycle_res['out']['kite_positions'][i].z
+    for i in range(n_in):
+        record['ri_speed{:02d}'.format(i)] = cycle_res['in']['reeling_speeds'][i]
+        record['ri_power{:02d}'.format(i)] = cycle_res['in']['steady_states'][i].power_ground
+        record['tan_speed_ri{:02d}'.format(i)] = cycle_res['in']['tangential_speeds'][i]
+        record['x_kite{:02d}'.format(i+n_out)] = cycle_res['in']['kite_positions'][i].x
+        record['z_kite{:02d}'.format(i+n_out)] = cycle_res['in']['kite_positions'][i].z
+
+    record = pd.Series(record).sort_index()
+
+    return record
 
 
-def construct_power_curve_test(wind_speed_step=1., power_optimization_limits=22, env_state=LogProfile(), maxiter=300,
-                               export_file=None, cut=True, obj_factors_mcp=[.5, .1, 0]):
-    from kitev3_10mm_tether import sys_props_v3
+def construct_power_curve(wind_speed_step=1., power_optimization_limits=22, env_state=LogProfile(), maxiter=300,
+                          export_file=None, cut=True, obj_factors_mcp=[.5, .1, 0]):
     plot_nth_step = 3
 
     ax_pc = plt.figure().gca()
-    ax_vars = plt.subplots(5, 2, sharex=True)[1].reshape(-1)
+    ax_vars = plt.subplots(4, 1, sharex=True)[1]
 
     fig, ax = plt.subplots(5, 1)
 
@@ -960,22 +982,23 @@ def construct_power_curve_test(wind_speed_step=1., power_optimization_limits=22,
     ax_traj.grid()
     # ax_traj.plot(150*np.cos(np.linspace(0, np.pi/2, 15)), 150*np.sin(np.linspace(0, np.pi/2, 15)), ':', color='grey')
 
-    opt_vars = np.empty((0, 19))
-    tan_speeds = np.empty((0, 15))
-    n_eq_cons, n_ineq_cons = 16, 56
-    h_sol = np.empty((0, n_eq_cons))
-    g_sol = np.empty((0, n_ineq_cons))
-    opt_vars_success = np.empty((0, 35))
+    opt_vars = np.empty((0, 4))
     success_counter = 0
-    mcps, success, wind_speeds, trajectories = [], [], [], []
-    min_height_ro, max_height_ro, max_height_ri = [], [], []
+    mcps, success, wind_speeds = [], [], []
     succeeded_opts = pd.DataFrame()
 
-    # Cut-in
+    # Run cut-in optimization
     oc_ci = OptimizerCycleCutKappa(sys_props_v3, env_state, 'in')
     x_opt = oc_ci.optimize(maxiter=maxiter)
     assert oc_ci.op_res['success'], "Cut-in optimization failed"
     x0_next = x_opt[:-1]
+
+    print("Minimum wind speed @ 100 m = {:.2f} m/s".format(x_opt[-1]))
+    env_state.set_reference_wind_speed(x_opt[-1])
+
+    # Collect and write cut-in results
+    cycle_res = oc_ci.eval_point()
+    print("Mean cycle power = {:.2f}".format(cycle_res['mean_cycle_power']))
 
     cons = oc_ci.eval_point(relax_errors=True)[1]
     eq_cons = cons[:oc_ci.N_EQ_CONS]
@@ -987,39 +1010,27 @@ def construct_power_curve_test(wind_speed_step=1., power_optimization_limits=22,
         print("Equality constraints:", eq_cons)
         print("Inequality constraints:", ineq_cons)
 
-    print("Minimum wind speed @ 100 m = {:.2f} m/s".format(x_opt[-1]))
-    env_state.calculate(10)
-    print("Minimum wind speed @ 10 m = {:.2f} m/s".format(env_state.wind_speed))
-    env_state.set_reference_wind_speed(x_opt[-1])
-    cycle_res = oc_ci.eval_point()
-    print("Mean cycle power = {:.2f}".format(cycle_res['mean_cycle_power']))
+    opt_vars = np.vstack((opt_vars, oc_ci.x_opt_real_scale[:4]))
+    mcps.append(cycle_res['mean_cycle_power'])
+    success.append(oc_ci.op_res['success'])
+    wind_speeds.append(x_opt[-1])
+
+    record = record_opt_result(env_state, x_opt[:-1], cycle_res, eq_cons, ineq_cons)
+    succeeded_opts = succeeded_opts.append(record, ignore_index=True)
+
+    # Plot cut-in results
     i_clr = 0
-    trajectories.append(plot_sol(cycle_res, i_clr, ax, ax_traj, ls='--.'))
+    plot_sol(cycle_res, i_clr, ax, ax_traj, ls='.-')
     ax_pc.plot(x_opt[-1], cycle_res['mean_cycle_power'], 's', color='C{}'.format(i_clr), mfc='None')
     for a, x in zip(ax_vars, x_opt[:4]*np.array([1, 1, 180./np.pi, 1])): a.plot(x_opt[-1], x, 's', color='C{}'.format(i_clr), mfc='None')
     success_counter += 1
 
-    record = record_opt_result(env_state, x_opt[:-1])
-    succeeded_opts = succeeded_opts.append(record, ignore_index=True)
-
-    opt_vars = np.vstack((opt_vars, oc_ci.x_opt_real_scale[:19]))
-    opt_vars_success = np.vstack((opt_vars_success, oc_ci.x_opt_real_scale))
-    h_sol = np.vstack((h_sol, eq_cons))
-    g_sol = np.vstack((g_sol, ineq_cons))
-    mcps.append(cycle_res['mean_cycle_power'])
-    success.append(oc_ci.op_res['success'])
-    wind_speeds.append(x_opt[-1])
-    max_height_ro.append(cycle_res['out']['kite_positions'][-1].z)
-    max_height_ri.append(max([kp.z for kp in cycle_res['in']['kite_positions']]))
-    min_height_ro.append(cycle_res['out']['kite_positions'][0].z)
-    tan_speeds = np.vstack((tan_speeds, cycle_res['out']['tangential_speeds']+cycle_res['in']['tangential_speeds']))
-
+    # Run main optimization
     v = x_opt[-1] + wind_speed_step
     while True:
-        print("Wind speed = {:.1f} m/s".format(v))
+        print("Wind speed = {:.2f} m/s".format(v))
         env_state.set_reference_wind_speed(v)
         oc = OptimizerCycleKappa(sys_props_v3, env_state)
-
         oc.x0_real_scale = x0_next
         try:
             oc.optimize(maxiter=maxiter)
@@ -1027,7 +1038,7 @@ def construct_power_curve_test(wind_speed_step=1., power_optimization_limits=22,
             if v > power_optimization_limits:
                 break
             else:
-                opt_vars = np.vstack((opt_vars, [np.nan]*19))
+                opt_vars = np.vstack((opt_vars, [np.nan]*4))
                 mcps.append(np.nan)
                 success.append(False)
                 wind_speeds.append(v)
@@ -1035,13 +1046,13 @@ def construct_power_curve_test(wind_speed_step=1., power_optimization_limits=22,
                 v += wind_speed_step
                 continue
 
+        # Collect and write results
         if oc.op_res['success']:  # or oc.op_res.get('exit_mode', -1) == 9:
             x0_next = oc.x_opt_real_scale
             v0_cut_out = v
-            # print("x_opt = ", x0_next)
             try:
                 cycle_res = oc.eval_point()
-                record = record_opt_result(env_state, oc.x_opt_real_scale)
+                record = record_opt_result(env_state, oc.x_opt_real_scale, cycle_res, eq_cons, ineq_cons)
                 succeeded_opts = succeeded_opts.append(record, ignore_index=True)
                 success_flag = True
             except:
@@ -1049,10 +1060,7 @@ def construct_power_curve_test(wind_speed_step=1., power_optimization_limits=22,
                 success_flag = False
         else:
             success_flag = False
-            try:
-                cycle_res = oc.eval_point()
-            except:
-                cycle_res = {}
+            cycle_res = {}
 
         cons = oc.eval_point(relax_errors=True)[1]
         eq_cons = cons[:oc.N_EQ_CONS]
@@ -1064,17 +1072,7 @@ def construct_power_curve_test(wind_speed_step=1., power_optimization_limits=22,
             print("Equality constraints:", eq_cons)
             print("Inequality constraints:", ineq_cons)
 
-        opt_vars = np.vstack((opt_vars, oc.x_opt_real_scale[:19]))
-        if success_flag:
-            opt_vars_success = np.vstack((opt_vars_success, np.append(oc.x_opt_real_scale, np.nan)))
-            h_sol = np.vstack((h_sol, eq_cons))
-            g_sol = np.vstack((g_sol, np.append(ineq_cons, np.nan)))
-            max_height_ro.append(cycle_res['out']['kite_positions'][-1].z)
-            max_height_ri.append(max([kp.z for kp in cycle_res['in']['kite_positions']]))
-            min_height_ro.append(cycle_res['out']['kite_positions'][0].z)
-            tan_speeds = np.vstack((tan_speeds, cycle_res['out']['tangential_speeds']+cycle_res['in']['tangential_speeds']))
-
-
+        opt_vars = np.vstack((opt_vars, oc.x_opt_real_scale[:4]))
         mcps.append(cycle_res.get('mean_cycle_power', np.nan))
         success.append(success_flag)
         wind_speeds.append(v)
@@ -1087,10 +1085,11 @@ def construct_power_curve_test(wind_speed_step=1., power_optimization_limits=22,
         #     plt.bar(range(oc.N_EQ_CONS), cons[:oc.N_EQ_CONS])
         #     plt.xticks(range(oc.N_EQ_CONS), oc.EQ_CONS_LABELS, rotation='vertical')
 
+        # Plot results
         if success_flag:
             if success_counter % plot_nth_step == 0:
                 i_clr = success_counter // plot_nth_step
-                trajectories.append(plot_sol(cycle_res, i_clr, ax, ax_traj))
+                plot_sol(cycle_res, i_clr, ax, ax_traj)
                 ax_pc.plot(v, cycle_res['mean_cycle_power'], 's', color='C{}'.format(i_clr), mfc='None')
                 for a, x in zip(ax_vars, oc.x_opt_real_scale[:4]*np.array([1, 1, 180./np.pi, 1])): a.plot(v, x, 's', color='C{}'.format(i_clr), mfc='None')
             success_counter += 1
@@ -1100,11 +1099,18 @@ def construct_power_curve_test(wind_speed_step=1., power_optimization_limits=22,
         v += wind_speed_step
 
     if cut:
-        # Cut-out
+        # Run cut-out optimizations
         for f in obj_factors_mcp:
             oc_co = OptimizerCycleCutKappa(sys_props_v3, env_state, 'out', [1, f])
             oc_co.x0_real_scale = np.hstack([x0_next, v0_cut_out])
             oc_co.optimize(maxiter=maxiter)
+
+            print("Minimum wind speed @ 100 m = {:.2f} m/s".format(oc_co.x_opt_real_scale[-1]))
+            env_state.set_reference_wind_speed(oc_co.x_opt_real_scale[-1])
+
+            # Collect and write cut-out results
+            cycle_res = oc_co.eval_point()
+            print("Mean cycle power = {:.2f}".format(cycle_res['mean_cycle_power']))
 
             cons = oc_co.eval_point(relax_errors=True)[1]
             eq_cons = cons[:oc_co.N_EQ_CONS]
@@ -1116,52 +1122,26 @@ def construct_power_curve_test(wind_speed_step=1., power_optimization_limits=22,
                 print("Equality constraints:", eq_cons)
                 print("Inequality constraints:", ineq_cons)
 
-            print("Minimum wind speed @ 100 m = {:.2f} m/s".format(oc_co.x_opt_real_scale[-1]))
-            env_state.calculate(10)
-            print("Minimum wind speed @ 10 m = {:.2f} m/s".format(env_state.wind_speed))
-            env_state.set_reference_wind_speed(oc_co.x_opt_real_scale[-1])
-            cycle_res = oc_co.eval_point()
-            print("Mean cycle power = {:.2f}".format(cycle_res['mean_cycle_power']))
-            i_clr = success_counter // plot_nth_step
-            trajectories.append(plot_sol(cycle_res, i_clr, ax, ax_traj, '--.'))
-            ax_pc.plot(oc_co.x_opt_real_scale[-1], cycle_res['mean_cycle_power'], 's', color='C{}'.format(i_clr), mfc='None')
-            for a, x in zip(ax_vars, oc_co.x_opt_real_scale[:4]*np.array([1, 1, 180./np.pi, 1])): a.plot(oc_co.x_opt_real_scale[-1], x, 's', color='C{}'.format(i_clr), mfc='None')
-            success_counter += 1
-
-            opt_vars = np.vstack((opt_vars, oc_co.x_opt_real_scale[:19]))
-            opt_vars_success = np.vstack((opt_vars_success, oc_co.x_opt_real_scale))
-            h_sol = np.vstack((h_sol, eq_cons))
-            g_sol = np.vstack((g_sol, ineq_cons))
+            opt_vars = np.vstack((opt_vars, oc_co.x_opt_real_scale[:4]))
             mcps.append(cycle_res['mean_cycle_power'])
             success.append(oc_co.op_res['success'])
             wind_speeds.append(oc_co.x_opt_real_scale[-1])
-            max_height_ro.append(cycle_res['out']['kite_positions'][-1].z)
-            max_height_ri.append(max([kp.z for kp in cycle_res['in']['kite_positions']]))
-            min_height_ro.append(cycle_res['out']['kite_positions'][0].z)
-            tan_speeds = np.vstack((tan_speeds, cycle_res['out']['tangential_speeds']+cycle_res['in']['tangential_speeds']))
 
             if oc_co.op_res['success']:
-                record = record_opt_result(env_state, oc_co.x_opt_real_scale[:-1])
+                record = record_opt_result(env_state, oc_co.x_opt_real_scale[:-1], cycle_res, eq_cons, ineq_cons)
                 succeeded_opts = succeeded_opts.append(record, ignore_index=True)
+
+            # Plot cut-out results
+            i_clr = success_counter // plot_nth_step
+            plot_sol(cycle_res, i_clr, ax, ax_traj, '.-')
+            ax_pc.plot(oc_co.x_opt_real_scale[-1], cycle_res['mean_cycle_power'], 's', color='C{}'.format(i_clr), mfc='None')
+            for a, x in zip(ax_vars, oc_co.x_opt_real_scale[:4]*np.array([1, 1, 180./np.pi, 1])): a.plot(oc_co.x_opt_real_scale[-1], x, 's', color='C{}'.format(i_clr), mfc='None')
+            success_counter += 1
 
     #Power curve
     wind_speeds_s, mcps_s = zip(*[(v, mcp) for v, mcp, s in zip(wind_speeds, mcps, success) if s])
     ax_pc.plot(wind_speeds_s, mcps_s, '.-')
     ax_pc.plot(wind_speeds, mcps)
-    # power_curve = np.vstack(([wind_speeds_s], [mcps_s]))
-    # np.save('power_curve.npy', power_curve)
-    # np.save('trajectories.npy', trajectories)
-
-    # pc_fe = np.load('power_curve_fixed_el.npy')
-    # trajs_fe = np.load('trajectories_fixed_el.npy')
-    # ax = plt.subplots(1, 3, sharex=True, sharey=True)[1]
-    # for a in ax: a.set_aspect('equal')
-    # for i, traj in enumerate(trajs_fe[9:12, :, :]):
-    #     ax[i].plot(traj[0, :], traj[1, :], '--')
-    #     ax_traj.plot(traj[0, :], traj[1, :], '--', color='C{}'.format(i))
-    # for i, traj in enumerate(np.array(trajectories)[9:12, :, :]):
-    #     ax[i].plot(traj[0, :], traj[1, :], color='C{}'.format(i))
-    # ax_pc.plot(pc_fe[0, :], pc_fe[1, :], '--')
 
     ax_traj.set_xlim([0, None])
     ax_traj.set_ylim([0, None])
@@ -1180,47 +1160,146 @@ def construct_power_curve_test(wind_speed_step=1., power_optimization_limits=22,
     ax_vars[2].plot(wind_speeds, opt_vars[:, 2] * 180. / np.pi, '.-')
     ax_vars[2].plot(wind_speeds[~success], opt_vars[~success, 2] * 180. / np.pi, 'x')
     ax_vars[2].set_ylabel('Elevation\nangle [$^\circ$]')
-    ax_vars[3].plot(wind_speeds, opt_vars[:, 3], '^-')
+    ax_vars[3].plot(wind_speeds, opt_vars[:, 3], '.-')
     ax_vars[3].plot(wind_speeds[~success], opt_vars[~success, 3], 'x')
     ax_vars[3].set_ylabel('Min. tether\nlength [m]')
-    ax_vars[4].plot(wind_speeds, opt_vars[:, 4]*1e-3, '^-', lw=.5)
-    ax_vars[4].plot(wind_speeds, opt_vars[:, 8]*1e-3, 'v-', lw=.5)
-    ax_vars[4].plot(wind_speeds, np.amin(opt_vars[:, 4:9], axis=1)*1e-3, '-')
-    ax_vars[4].plot(wind_speeds, np.amax(opt_vars[:, 4:9], axis=1)*1e-3, '-')
-    ax_vars[4].set_ylabel('Tether force\nreel-out [kN]')
-    ax_vars[5].plot(wind_speeds, opt_vars[:, 9]*1e-3, 'v-', lw=.5)
-    ax_vars[5].plot(wind_speeds, opt_vars[:, 18]*1e-3, '^-', lw=.5)
-    ax_vars[5].plot(wind_speeds, np.amin(opt_vars[:, 9:19], axis=1)*1e-3, '-')
-    ax_vars[5].plot(wind_speeds, np.amax(opt_vars[:, 9:19], axis=1)*1e-3, '-')
-    ax_vars[5].set_ylabel('Tether force\nreel-in [kN]')
 
-    ax_vars[6].plot(wind_speeds[success], tan_speeds[:, 0], '^-', lw=.5)
-    ax_vars[6].plot(wind_speeds[success], tan_speeds[:, 4], 'v-', lw=.5)
-    ax_vars[6].plot(wind_speeds[success], np.amin(tan_speeds[:, :5], axis=1), '-')
-    ax_vars[6].plot(wind_speeds[success], np.amax(tan_speeds[:, :5], axis=1), '-')
-    ax_vars[6].plot(wind_speeds[success], 300/opt_vars[success, 0], '--', color='k')
-    ax_vars[6].set_ylabel('Tangential speeds\nreel-out [m/s]')
-    ax_vars[7].plot(wind_speeds[success], tan_speeds[:, 5], 'v-', lw=.5)
-    ax_vars[7].plot(wind_speeds[success], tan_speeds[:, 14], '^-', lw=.5)
-    ax_vars[7].plot(wind_speeds[success], np.amin(tan_speeds[:, 5:], axis=1), '-')
-    ax_vars[7].plot(wind_speeds[success], np.amax(tan_speeds[:, 5:], axis=1), '-')
-    ax_vars[7].set_ylabel('Tangential speeds\nreel-in [m/s]')
-    ax_vars[8].plot(wind_speeds[success], min_height_ro, '^-')
-    ax_vars[8].plot(wind_speeds[success], max_height_ro, '+-')
-    ax_vars[8].plot(wind_speeds[success], max_height_ri, 'v-')
-    ax_vars[8].set_ylabel('Kite height [kN]')
+    if export_file is not None:
+        # 'opt_res_llj_profile2.csv'
+        succeeded_opts.to_csv(export_file, index=False)
+    return succeeded_opts
 
-    n_opts = h_sol.shape[0]
+
+def plot_curves_and_trajectories(df, env_state):
+    oc = OptimizerCycleKappa(sys_props_v3, env_state)
+
+    ax_vars = plt.subplots(3, 2, figsize=[8, 4], sharex=True)[1].reshape(-1)
+    plt.subplots_adjust(left=.13, bottom=.136, right=.98, top=.98, wspace=.37)
+    ax_vars[0].plot(df['vw100'], df['mcp']*1e-3, '-')
+    ax_vars[0].set_ylabel('Mean cycle\npower [kW]')
+    ax_vars[1].plot(df['vw100'], df['x00']/(df['x00']+df['x01']+17)*100, '-')
+    ax_vars[1].set_ylabel('Duty cycle [%]')
+    ax_vars[1].set_ylim([0, 100])
+    ax_vars[2].plot(df['vw100'], df['x00'], '-')
+    ax_vars[2].set_ylabel('Duration\nreel-out [s]')
+    ax_vars[3].plot(df['vw100'], df['x01'], '-')
+    ax_vars[3].axhline(oc.bounds_real_scale[1, 0], color='k', ls=':')
+    ax_vars[3].set_ylabel('Duration\nreel-in [s]')
+    ax_vars[4].plot(df['vw100'], df['x02'] * 180. / np.pi, '-')
+    ax_vars[4].axhline(oc.bounds_real_scale[2, 0] * 180./np.pi, color='k', ls=':')
+    ax_vars[4].set_ylabel('Elevation\nangle [$^\circ$]')
+    ax_vars[5].plot(df['vw100'], df['x03'], '-')
+    ax_vars[5].set_ylabel('Min. tether\nlength [m]')
+    ax_vars[4].set_xlabel('$v_{w,100m}$ [m/s]')
+    ax_vars[5].set_xlabel('$v_{w,100m}$ [m/s]')
+
+    for a in ax_vars:
+        a.grid()
+        a.set_ylim([0, None])
+    add_panel_labels(ax_vars, .35)
+
+    fig, ax_char = plt.subplots(4, 2, figsize=[8, 6], sharex=True)
+    fig.delaxes(ax_char[3, 1])
+    ax_char = ax_char.reshape(-1)
+    plt.subplots_adjust(left=.115, bottom=.09, right=.98, top=.98, wspace=.345)
+    ax_char[0].plot(df['vw100'], df['x04']*1e-3, '>-', ms=5)
+    ax_char[0].plot(df['vw100'], df['x08']*1e-3, '.-')
+    ax_char[0].plot(df['vw100'], np.amin(df.loc[:, 'x04':'x08'], axis=1)*1e-3, '--')
+    ax_char[0].plot(df['vw100'], np.amax(df.loc[:, 'x04':'x08'], axis=1)*1e-3, '--')
+    ax_char[0].axhline(oc.bounds_real_scale[4, 0]*1e-3, color='k', ls=':')
+    ax_char[0].axhline(oc.bounds_real_scale[4, 1]*1e-3, color='k', ls=':')
+    ax_char[0].set_ylabel('Tether force\nreel-out [kN]')
+    ax_char[1].plot(df['vw100'], df['x09']*1e-3, '>-', ms=5)
+    ax_char[1].plot(df['vw100'], df['x18']*1e-3, '.-')
+    ax_char[1].plot(df['vw100'], np.amin(df.loc[:, 'x09':'x18'], axis=1)*1e-3, '--')
+    ax_char[1].plot(df['vw100'], np.amax(df.loc[:, 'x09':'x18'], axis=1)*1e-3, '--')
+    ax_char[1].axhline(oc.bounds_real_scale[4, 0] * 1e-3, color='k', ls=':')
+    ax_char[1].axhline(oc.bounds_real_scale[4, 1] * 1e-3, color='k', ls=':')
+    ax_char[1].set_ylabel('Tether force\nreel-in [kN]')
+
+    ax_char[2].plot(df['vw100'], df['ro_speed00'], '>-', ms=5)
+    ax_char[2].plot(df['vw100'], df['ro_speed04'], '.-')
+    ax_char[2].plot(df['vw100'], np.amin(df.loc[:, 'ro_speed00':'ro_speed04'], axis=1), '--')
+    ax_char[2].plot(df['vw100'], np.amax(df.loc[:, 'ro_speed00':'ro_speed04'], axis=1), '--')
+    ax_char[2].axhline(sys_props_v3.reeling_speed_min_limit, color='k', ls=':')
+    ax_char[2].axhline(sys_props_v3.reeling_speed_max_limit, color='k', ls=':')
+    ax_char[2].set_ylabel('Reel-out\nspeeds [m/s]')
+    ax_char[3].plot(df['vw100'], -df['ri_speed00'], '>-', ms=5)
+    ax_char[3].plot(df['vw100'], -df['ri_speed09'], '.-')
+    ax_char[3].plot(df['vw100'], np.amin(-df.loc[:, 'ri_speed00':'ri_speed09'], axis=1), '--')
+    ax_char[3].plot(df['vw100'], np.amax(-df.loc[:, 'ri_speed00':'ri_speed09'], axis=1), '--')
+    ax_char[3].axhline(sys_props_v3.reeling_speed_max_limit, color='k', ls=':')
+    ax_char[3].set_ylabel('Reel-in\nspeeds [m/s]')
+
+    ax_char[4].plot(df['vw100'], df['tan_speed_ro00'], '>-', ms=5)
+    ax_char[4].plot(df['vw100'], df['tan_speed_ro04'], '.-')
+    ax_char[4].plot(df['vw100'], np.amin(df.loc[:, 'tan_speed_ro00':'tan_speed_ro04'], axis=1), '--')
+    ax_char[4].plot(df['vw100'], np.amax(df.loc[:, 'tan_speed_ro00':'tan_speed_ro04'], axis=1), '--')
+    ax_char[4].plot(df['vw100'], 300/df['x00'], ':', color='k')
+    ax_char[4].set_ylabel('Tangential speeds\nreel-out [m/s]')
+    ax_char[5].plot(df['vw100'], df['tan_speed_ri00'], '>-', ms=5)
+    ax_char[5].plot(df['vw100'], df['tan_speed_ri09'], '.-')
+    ax_char[5].plot(df['vw100'], np.amin(df.loc[:, 'tan_speed_ri00':'tan_speed_ri09'], axis=1), '--')
+    ax_char[5].plot(df['vw100'], np.amax(df.loc[:, 'tan_speed_ri00':'tan_speed_ri09'], axis=1), '--')
+    ax_char[5].axhline(0, color='k', ls=':')
+    ax_char[5].set_ylabel('Tangential speeds\nreel-in [m/s]')
+    ax_char[6].plot(df['vw100'], df['min_height_ro'], '>-', ms=5)
+    ax_char[6].plot(df['vw100'], df['max_height_ro'], '.-')
+    ax_char[6].plot(df['vw100'], df['max_height_ri'], '--', color='C3')
+    ax_char[6].axhline(100, color='k', ls=':')
+    ax_char[6].axhline(500, color='k', ls=':')
+    ax_char[6].set_ylabel('Kite height [m]')
+    ax_char[6].set_xlabel('$v_{w,100m}$ [m/s]')
+    ax_char[5].set_xlabel('$v_{w,100m}$ [m/s]')
+
+    for i, a in enumerate(ax_char):
+        a.grid()
+        a.set_ylim([0, None])
+    add_panel_labels(ax_char, .3)
+
+    fig = plt.figure(figsize=[7, 2.6])
+    plt.subplots_adjust(left=.126, right=1, top=.95, bottom=.195, wspace=0.15, hspace=.2)
+    spec = fig.add_gridspec(ncols=2, nrows=1, width_ratios=[1, 3], height_ratios=[1])
+    ax_profile = fig.add_subplot(spec[0, 0])
+    ax_traj = fig.add_subplot(spec[0, 1])
+    ax_traj.set_xlabel('Downwind position [m]')
+    ax_traj.yaxis.set_ticklabels([])
+    add_panel_labels(np.array([ax_profile, ax_traj]), [.6, .1])
+
+    env_state.set_reference_wind_speed(1)
+    env_state.plot_wind_profile(ax_profile)
+    ax_traj.set_aspect('equal')
+    ax_traj.grid()
+
+    for i_clr, i in enumerate(range(0, df.shape[0], 3)):
+        ax_traj.plot(df.loc[i, 'x_kite00':'x_kite04'], df.loc[i, 'z_kite00':'z_kite04'], '.-', color='C{}'.format(i_clr), mfc='None')
+        ax_traj.plot(df.loc[i, 'x_kite05':'x_kite14'], df.loc[i, 'z_kite05':'z_kite14'], '.-', color='C{}'.format(i_clr), mfc='None')
+
+        xf = df.iloc[i]['x_kite14']
+        zf = df.iloc[i]['z_kite14']
+
+        l = (xf**2 + zf**2)**.5
+        beta_f = np.arctan(zf/xf)
+        beta = np.linspace(df.iloc[i]['x02'], beta_f, 30)
+        ax_traj.plot(np.cos(beta) * l, np.sin(beta) * l, color='C{}'.format(i_clr), lw=.5)
+
+
+def plot_constraints(df):
+    oc = OptimizerCycleKappa(sys_props_v3, env_state)
+
+    n_opts = df.shape[0]
+    n_eq_cons = 16
     ax = plt.subplots(3, n_eq_cons // 3 + 1)[1].reshape(-1)
     plt.subplots_adjust(left=.04, right=.99, wspace=.7)
-    for i, hs in enumerate(h_sol.T):
+    for i, hs in enumerate(df.loc[:, 'h000':'h{:03d}'.format(n_eq_cons-1)].values.T):
         ax[i].bar(range(n_opts), hs, color=np.where(np.abs(hs) > gtol, 'C3', 'C0'))
         ax[i].set_ylabel(oc.EQ_CONS_LABELS[i])
 
+    n_ineq_cons = 56
     ax = plt.subplots(5, n_ineq_cons // 5 + 1)[1].reshape(-1)
     plt.subplots_adjust(left=.04, right=.99, wspace=.7)
     ineq_cons_labels = oc.INEQ_CONS_LABELS + ['Mean cycle power']
-    for i, gs in enumerate(g_sol.T):
+    for i, gs in enumerate(df.loc[:, 'g000':'g{:03d}'.format(n_ineq_cons-1)].values.T):
         ax[i].bar(range(n_opts), gs, color=np.where(gs < -gtol, 'C3', 'C0'))
         ax[i].set_ylabel(ineq_cons_labels[i])
 
@@ -1229,10 +1308,11 @@ def construct_power_curve_test(wind_speed_step=1., power_optimization_limits=22,
                       ['Max. reel-in speed 1', 'Min. tangential speed in 1'],
                       ['Max. reel-in speed 10', 'Min. tangential speed in 10']]
 
+    plot_nth_step = 3
     ax = plt.subplots(4, 4)[1]
     for a, ix in zip(ax[:, 0], [4, 8, 9, 18]):
-        a.bar(range(n_opts), opt_vars_success[:, ix], color='grey')
-        for i_opt, xi in zip(range(n_opts), opt_vars_success[:, ix]):
+        a.bar(range(n_opts), df['x{:02d}'.format(ix)], color='grey')
+        for i_opt, xi in zip(range(n_opts), df['x{:02d}'.format(ix)]):
             if i_opt % plot_nth_step == 0:
                 i_clr = i_opt // plot_nth_step
                 a.bar(i_opt, xi, color='C{}'.format(i_clr))
@@ -1242,25 +1322,22 @@ def construct_power_curve_test(wind_speed_step=1., power_optimization_limits=22,
     for i, row_keys in enumerate(highlight_keys):
         for j, k in enumerate(row_keys):
             ki = ineq_cons_labels.index(k)
-            gs = g_sol[:, ki]
+            gs = df['g{:03d}'.format(ki)]  # g_sol[:, ki]
             ax[i, j+1].bar(range(n_opts), gs, color=np.where(gs < -gtol, 'C3', 'C0'))
             ax[i, j+1].set_ylabel(k)
 
-    if export_file is not None:
-        # 'opt_res_llj_profile2.csv'
-        succeeded_opts.to_csv(export_file, index=False)
 
 
 if __name__ == "__main__":
-    # env_state = LogProfile()
-    env_state = NormalisedWindTable1D()
-    h = [10., 20., 40., 60., 80., 100., 120., 140., 150., 160., 180., 200., 220., 250., 300., 500., 600.]
-    v = [0.31916794, 0.38611869, 0.55029902, 0.65804212, 0.73519261, 0.79609015,
-         0.84480401, 0.88139352, 0.89594957, 0.90781971, 0.92918228, 0.94297737,
-         0.95193377, 0.9588552, 0.95571666, 0.88390919, 0.84849594]
-    env_state.heights = h
-    env_state.h_ref = h[np.argmax(v)]
-    env_state.normalised_wind_speeds = v / np.amax(v)
+    env_state = LogProfile()
+    # env_state = NormalisedWindTable1D()
+    # h = [10., 20., 40., 60., 80., 100., 120., 140., 150., 160., 180., 200., 220., 250., 300., 500., 600.]
+    # v = [0.31916794, 0.38611869, 0.55029902, 0.65804212, 0.73519261, 0.79609015,
+    #      0.84480401, 0.88139352, 0.89594957, 0.90781971, 0.92918228, 0.94297737,
+    #      0.95193377, 0.9588552, 0.95571666, 0.88390919, 0.84849594]
+    # env_state.heights = h
+    # env_state.h_ref = h[np.argmax(v)]
+    # env_state.normalised_wind_speeds = v / np.amax(v)
 
     # find_cut_speed(x0=[1.13764272e+02, 6.08751315e+01, 9.48468048e-01, 2.49842316e+02,
     #                    5.00000000e+03, 5.00000000e+03, 5.00000000e+03, 2.90299356e+03,
@@ -1280,6 +1357,8 @@ if __name__ == "__main__":
     # eval_limit(env_state=env_state, wind_speeds=np.arange(25, 26.5, .5), cut='out')
     # eval_limit(env_state=LogProfile(), wind_speeds=np.arange(21, 23., .5), cut='out')
 
-    construct_power_curve_test(obj_factors_mcp=[.1])  #env_state=env_state, power_optimization_limits=26)  #, export_file='opt_res_llj_profile2.csv')
+    # df = construct_power_curve(obj_factors_mcp=[.5])  #, export_file='opt_res_log_profile.csv')  #env_state=env_state, power_optimization_limits=26)  #, export_file='opt_res_llj_profile2.csv')
+    df = pd.read_csv('opt_res_log_profile.csv')
+    plot_curves_and_trajectories(df, env_state)
     # test_convergence()
     plt.show()
