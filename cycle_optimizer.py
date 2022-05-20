@@ -5,7 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from utils import add_panel_labels
 
-from qsm import OptCycle, LogProfile, NormalisedWindTable1D
+from qsm import OptCycle, LogProfile, SteadyState, KiteKinematics
 from kitev3_10mm_tether import sys_props_v3
 
 class OptimizerError(Exception):
@@ -259,6 +259,103 @@ class Optimizer:
         return self.x_opt_real_scale
 
 
+class OptimizerReelOutState(Optimizer):
+    OPT_VARIABLE_LABELS = [
+        'Reel-out\nforce [N]',
+        "Reel-out elevation\nangle [rad]",
+        'Tether length [m]',
+        'Kinematic\nratio [-]',
+        'Wind speed [m/s]'
+    ]
+    X0_REAL_SCALE_DEFAULT = np.array([2000, 30*np.pi/180., 150, 4, 10])
+
+    SCALING_X_DEFAULT = np.array([1e-4, 1, 1e-2, 1, 1e-1])
+    BOUNDS_REAL_SCALE_DEFAULT = np.array([
+        [np.nan, np.nan],
+        [25*np.pi/180, 70.*np.pi/180.],
+        [100, np.inf],
+        [0, 15],
+        [1, 50],
+    ])
+    N_INEQ_CONS = 4
+    N_EQ_CONS = 1
+
+    def __init__(self, system_properties, environment_state, elevation_angle=None, wind_speed=None, obj_factors=[0, 1, 0]):
+        # Initiate attributes of parent class.
+        bounds = self.BOUNDS_REAL_SCALE_DEFAULT.copy()
+        bounds[0, :] = [system_properties.tether_force_min_limit, system_properties.tether_force_max_limit]
+        self.obj_factors = obj_factors
+
+        x0 = self.X0_REAL_SCALE_DEFAULT.copy()
+        if elevation_angle is not None:
+            x0[1] = elevation_angle
+            bounds[1, :] = elevation_angle
+        if wind_speed is not None:
+            x0[4] = wind_speed
+            bounds[4, :] = wind_speed
+        super().__init__(x0, bounds, self.SCALING_X_DEFAULT.copy(), self.N_INEQ_CONS,
+                         self.N_EQ_CONS, system_properties, environment_state)
+
+    def eval_fun(self, x, scale_x=True, relax_errors=True):
+        """Method calculating the objective and constraint functions from the eval_performance_indicators method output.
+        """
+        # Convert the optimization vector to real scale values and perform simulation.
+        if scale_x:
+            x_real_scale = x/self.scaling_x
+        else:
+            x_real_scale = x
+        f = x_real_scale[0]
+        beta = x_real_scale[1]
+        tether_length = x_real_scale[2]
+        kappa = x_real_scale[3]
+        wind_speed = x_real_scale[4]
+
+        # Create objects containing the kite position and course angle for reel-out and reel-in.
+        kp = {
+            'straight_tether_length': tether_length,
+            'azimuth_angle': 0.2012354421510459,  # [rad]
+            'elevation_angle': beta,
+            'course_angle': 1.6249951922452899,  # [rad]
+        }
+        kp = KiteKinematics(**kp)
+
+        self.system_properties.update(tether_length, True)
+        self.environment_state.set_reference_wind_speed(wind_speed)
+        self.environment_state.calculate(kp.z)
+
+        ss = SteadyState({'enable_steady_state_errors': not relax_errors})
+        ss.control_settings = ('tether_force_ground', f)
+        ss.find_state_opt(kappa, self.system_properties, self.environment_state, kp, relax_errors)
+
+        p = ss.power_ground
+        vt = ss.reeling_speed
+
+        if not relax_errors:
+            return p, vt, kp.z
+
+        obj = self.obj_factors[0] * wind_speed * 1e-2 - self.obj_factors[1] * p * 1e-5 - self.obj_factors[2]*tether_length*1e-2
+        eq_cons = [ss.lift_to_drag_error]
+
+        # The maximum reel-out tether force can be exceeded when the tether force control is overruled by the maximum
+        # reel-out speed limit and the imposed reel-out speed yields a tether force exceeding its set point. This
+        # scenario is prevented by the lower constraint.
+        speed_min_limit = self.system_properties.reeling_speed_min_limit
+        speed_max_limit = self.system_properties.reeling_speed_max_limit
+
+        ineq_cons = []
+
+        speed_violation_traction = vt - speed_min_limit
+        ineq_cons.append(speed_violation_traction / speed_max_limit)
+
+        speed_violation_traction = vt - speed_max_limit
+        ineq_cons.append(-speed_violation_traction / speed_max_limit)
+
+        ineq_cons += [kp.z - 100]
+        ineq_cons += [500 - kp.z]
+
+        return obj, np.hstack([eq_cons, np.array(ineq_cons)])
+
+
 class OptimizerCycleKappa(Optimizer):
     """Tether force controlled cycle optimizer. Zero reeling speed is used as setpoint for transition phase."""
     N_POINTS_PER_PHASE = [5, 10]
@@ -271,8 +368,8 @@ class OptimizerCycleKappa(Optimizer):
     OPT_VARIABLE_LABELS = OPT_VARIABLE_LABELS + \
                           ["Reel-out\nforce {} [N]".format(i + 1) for i in range(N_POINTS_PER_PHASE[0])] + \
                           ["Reel-in\nforce {} [N]".format(i + 1) for i in range(N_POINTS_PER_PHASE[1])] + \
-                          ["Kinematics\nratios out".format(i + 1) for i in range(N_POINTS_PER_PHASE[0])] + \
-                          ["Kinematics\nratios in".format(i + 1) for i in range(N_POINTS_PER_PHASE[1])]
+                          ["Kinematic\nratio out {} [-]".format(i + 1) for i in range(N_POINTS_PER_PHASE[0])] + \
+                          ["Kinematic\nratio in {} [-]".format(i + 1) for i in range(N_POINTS_PER_PHASE[1])]
 
     X0_REAL_SCALE_DEFAULT = np.array([30, 20, 30 * np.pi / 180., 170])
     X0_REAL_SCALE_DEFAULT = np.hstack([X0_REAL_SCALE_DEFAULT, np.ones(N_POINTS_PER_PHASE[0]) * 2000,
@@ -384,8 +481,8 @@ class OptimizerCycleCutKappa(Optimizer):
     OPT_VARIABLE_LABELS = OPT_VARIABLE_LABELS + \
                           ["Reel-out\nforce {} [N]".format(i+1) for i in range(N_POINTS_PER_PHASE[0])] + \
                           ["Reel-in\nforce {} [N]".format(i+1) for i in range(N_POINTS_PER_PHASE[1])] + \
-                          ["Kinematics\nratios out".format(i+1) for i in range(N_POINTS_PER_PHASE[0])] + \
-                          ["Kinematics\nratios in".format(i+1) for i in range(N_POINTS_PER_PHASE[1])] + \
+                          ["Kinematic\nratio out {} [-]".format(i+1) for i in range(N_POINTS_PER_PHASE[0])] + \
+                          ["Kinematic\nratio in {} [-]".format(i+1) for i in range(N_POINTS_PER_PHASE[1])] + \
                           ['Wind speed [m/s]']
 
     X0_REAL_SCALE_DEFAULT = np.array([30, 20, 30*np.pi/180., 170])
@@ -1170,7 +1267,46 @@ def construct_power_curve(wind_speed_step=1., power_optimization_limits=22, env_
     return succeeded_opts
 
 
+def mpp_curve(env_state, beta_deg=25, vw_step=.5, ax=None):
+    beta = beta_deg*np.pi/180
+
+    oc = OptimizerReelOutState(sys_props_v3, env_state, elevation_angle=beta, obj_factors=[1, 0, 0])
+    x_opt = oc.optimize(maxiter=100)
+    vw = x_opt[-1]
+    p, vt, h = oc.eval_point(relax_errors=False)
+    opt_heights = [h]
+    vw_range = [vw]
+    powers = [p]
+
+    max_vt_reached = False
+    while True:
+        vw += vw_step
+        oc = OptimizerReelOutState(sys_props_v3, env_state, elevation_angle=beta, wind_speed=vw, obj_factors=[0, 1, 0])
+        x_opt = oc.optimize(maxiter=100)
+        p, vt, h = oc.eval_point(relax_errors=False)
+        if not max_vt_reached and vt > 9.99:
+            vw -= vw_step
+            vw_step = .1
+            max_vt_reached = True
+            continue
+        elif max_vt_reached and vt > 9.99:
+            break
+        opt_heights.append(h)
+        vw_range.append(vw)
+        powers.append(p)
+
+    if ax is None:
+        return vw_range, opt_heights
+    else:
+        ax[0].plot(vw_range, opt_heights, '*-', label=beta_deg)
+        ax[1].plot(vw_range, powers, '*-', label=beta_deg)
+
+
 def plot_curves_and_trajectories(df, env_state):
+    highlight_ith_opts = range(0, df.shape[0], 3)
+    highlight_wind_speeds = [df.loc[i, 'vw100'] for i in highlight_ith_opts]
+    highlight_labels = ["{:.1f}".format(v) for v in highlight_wind_speeds]
+
     oc = OptimizerCycleKappa(sys_props_v3, env_state)
 
     ax_vars = plt.subplots(3, 2, figsize=[8, 4], sharex=True)[1].reshape(-1)
@@ -1185,7 +1321,7 @@ def plot_curves_and_trajectories(df, env_state):
     ax_vars[3].plot(df['vw100'], df['x01'], '-')
     ax_vars[3].axhline(oc.bounds_real_scale[1, 0], color='k', ls=':')
     ax_vars[3].set_ylabel('Duration\nreel-in [s]')
-    ax_vars[4].plot(df['vw100'], df['x02'] * 180. / np.pi, '-')
+    ax_vars[4].plot(df['vw100'], df['x02'] * 180./np.pi, '-')
     ax_vars[4].axhline(oc.bounds_real_scale[2, 0] * 180./np.pi, color='k', ls=':')
     ax_vars[4].set_ylabel('Elevation\nangle [$^\circ$]')
     ax_vars[5].plot(df['vw100'], df['x03'], '-')
@@ -1193,29 +1329,45 @@ def plot_curves_and_trajectories(df, env_state):
     ax_vars[4].set_xlabel('$v_{w,100m}$ [m/s]')
     ax_vars[5].set_xlabel('$v_{w,100m}$ [m/s]')
 
-    for a in ax_vars:
-        a.grid()
+    for i, a in enumerate(ax_vars):
         a.set_ylim([0, None])
+        a.set_xticks(highlight_wind_speeds)
+        a.set_xticklabels(highlight_labels)
+        a.grid()
     add_panel_labels(ax_vars, .35)
 
-    fig, ax_char = plt.subplots(4, 2, figsize=[8, 6], sharex=True)
-    fig.delaxes(ax_char[3, 1])
-    ax_char = ax_char.reshape(-1)
-    plt.subplots_adjust(left=.115, bottom=.09, right=.98, top=.98, wspace=.345)
-    ax_char[0].plot(df['vw100'], df['x04']*1e-3, '>-', ms=5)
-    ax_char[0].plot(df['vw100'], df['x08']*1e-3, '.-')
-    ax_char[0].plot(df['vw100'], np.amin(df.loc[:, 'x04':'x08'], axis=1)*1e-3, '--')
-    ax_char[0].plot(df['vw100'], np.amax(df.loc[:, 'x04':'x08'], axis=1)*1e-3, '--')
-    ax_char[0].axhline(oc.bounds_real_scale[4, 0]*1e-3, color='k', ls=':')
+    fig = plt.figure(figsize=[8, 7])
+    plt.subplots_adjust(left=.12, bottom=.07, right=.99, top=.9, wspace=.67, hspace=.17)
+    spec = fig.add_gridspec(ncols=4, nrows=6, height_ratios=[1, 1, 1, 1, .4, 1])
+
+    ax_char = []
+    for i in range(8):
+        if i % 2:
+            ax_char.append(fig.add_subplot(spec[i//2, 2:]))
+        else:
+            ax_char.append(fig.add_subplot(spec[i//2, :2]))
+    ax_char.append(fig.add_subplot(spec[5, 1:3]))
+    ax_char = np.array(ax_char)
+    ax_char[0].get_shared_x_axes().join(*ax_char[1:])
+
+    ax_char[0].set_title("Traction phase")
+    ax_char[1].set_title("Retraction phase")
+    ax_char[0].plot(df['vw100'], df['x04']*1e-3, '>-', ms=5, label='Start')
+    ax_char[0].plot(df['vw100'], df['x08']*1e-3, '.-', label='End')
+    ax_char[0].plot(df['vw100'], np.amin(df.loc[:, 'x04':'x08'], axis=1)*1e-3, '--', label='Min.')
+    ax_char[0].plot(df['vw100'], np.amax(df.loc[:, 'x04':'x08'], axis=1)*1e-3, '--', label='Max.')
+    ax_char[0].axhline(oc.bounds_real_scale[4, 0]*1e-3, color='k', ls=':', label='Limit')
     ax_char[0].axhline(oc.bounds_real_scale[4, 1]*1e-3, color='k', ls=':')
-    ax_char[0].set_ylabel('Tether force\nreel-out [kN]')
+    ax_char[0].set_ylabel('Tether force [kN]')
+    ax_char[0].legend(bbox_to_anchor=(0.2, 1.35, 1.85, .5), loc="lower left", mode="expand",
+                      borderaxespad=0, ncol=5)
+
     ax_char[1].plot(df['vw100'], df['x09']*1e-3, '>-', ms=5)
     ax_char[1].plot(df['vw100'], df['x18']*1e-3, '.-')
     ax_char[1].plot(df['vw100'], np.amin(df.loc[:, 'x09':'x18'], axis=1)*1e-3, '--')
     ax_char[1].plot(df['vw100'], np.amax(df.loc[:, 'x09':'x18'], axis=1)*1e-3, '--')
-    ax_char[1].axhline(oc.bounds_real_scale[4, 0] * 1e-3, color='k', ls=':')
-    ax_char[1].axhline(oc.bounds_real_scale[4, 1] * 1e-3, color='k', ls=':')
-    ax_char[1].set_ylabel('Tether force\nreel-in [kN]')
+    ax_char[1].axhline(oc.bounds_real_scale[9, 0] * 1e-3, color='k', ls=':')
+    ax_char[1].axhline(oc.bounds_real_scale[9, 1] * 1e-3, color='k', ls=':')
 
     ax_char[2].plot(df['vw100'], df['ro_speed00'], '>-', ms=5)
     ax_char[2].plot(df['vw100'], df['ro_speed04'], '.-')
@@ -1223,57 +1375,94 @@ def plot_curves_and_trajectories(df, env_state):
     ax_char[2].plot(df['vw100'], np.amax(df.loc[:, 'ro_speed00':'ro_speed04'], axis=1), '--')
     ax_char[2].axhline(sys_props_v3.reeling_speed_min_limit, color='k', ls=':')
     ax_char[2].axhline(sys_props_v3.reeling_speed_max_limit, color='k', ls=':')
-    ax_char[2].set_ylabel('Reel-out\nspeeds [m/s]')
-    ax_char[3].plot(df['vw100'], -df['ri_speed00'], '>-', ms=5)
-    ax_char[3].plot(df['vw100'], -df['ri_speed09'], '.-')
-    ax_char[3].plot(df['vw100'], np.amin(-df.loc[:, 'ri_speed00':'ri_speed09'], axis=1), '--')
-    ax_char[3].plot(df['vw100'], np.amax(-df.loc[:, 'ri_speed00':'ri_speed09'], axis=1), '--')
-    ax_char[3].axhline(sys_props_v3.reeling_speed_max_limit, color='k', ls=':')
-    ax_char[3].set_ylabel('Reel-in\nspeeds [m/s]')
+    ax_char[2].set_ylabel('Reeling\nspeed [m/s]')
+    ax_char[3].plot(df['vw100'], df['ri_speed00'], '>-', ms=5)
+    ax_char[3].plot(df['vw100'], df['ri_speed09'], '.-')
+    ax_char[3].plot(df['vw100'], np.amin(df.loc[:, 'ri_speed00':'ri_speed09'], axis=1), '--')
+    ax_char[3].plot(df['vw100'], np.amax(df.loc[:, 'ri_speed00':'ri_speed09'], axis=1), '--')
+    ax_char[3].axhline(-sys_props_v3.reeling_speed_max_limit, color='k', ls=':')
 
-    ax_char[4].plot(df['vw100'], df['tan_speed_ro00'], '>-', ms=5)
-    ax_char[4].plot(df['vw100'], df['tan_speed_ro04'], '.-')
-    ax_char[4].plot(df['vw100'], np.amin(df.loc[:, 'tan_speed_ro00':'tan_speed_ro04'], axis=1), '--')
-    ax_char[4].plot(df['vw100'], np.amax(df.loc[:, 'tan_speed_ro00':'tan_speed_ro04'], axis=1), '--')
-    ax_char[4].plot(df['vw100'], 300/df['x00'], ':', color='k')
-    ax_char[4].set_ylabel('Tangential speeds\nreel-out [m/s]')
-    ax_char[5].plot(df['vw100'], df['tan_speed_ri00'], '>-', ms=5)
-    ax_char[5].plot(df['vw100'], df['tan_speed_ri09'], '.-')
-    ax_char[5].plot(df['vw100'], np.amin(df.loc[:, 'tan_speed_ri00':'tan_speed_ri09'], axis=1), '--')
-    ax_char[5].plot(df['vw100'], np.amax(df.loc[:, 'tan_speed_ri00':'tan_speed_ri09'], axis=1), '--')
-    ax_char[5].axhline(0, color='k', ls=':')
-    ax_char[5].set_ylabel('Tangential speeds\nreel-in [m/s]')
-    ax_char[6].plot(df['vw100'], df['min_height_ro'], '>-', ms=5)
-    ax_char[6].plot(df['vw100'], df['max_height_ro'], '.-')
-    ax_char[6].plot(df['vw100'], df['max_height_ri'], '--', color='C3')
-    ax_char[6].axhline(100, color='k', ls=':')
-    ax_char[6].axhline(500, color='k', ls=':')
-    ax_char[6].set_ylabel('Kite height [m]')
+    ax_char[4].plot(df['vw100'], df['ro_power00']*1e-3, '>-', ms=5)
+    ax_char[4].plot(df['vw100'], df['ro_power04']*1e-3, '.-')
+    ax_char[4].plot(df['vw100'], np.amin(df.loc[:, 'ro_power00':'ro_power04']*1e-3, axis=1), '--')
+    ax_char[4].plot(df['vw100'], np.amax(df.loc[:, 'ro_power00':'ro_power04']*1e-3, axis=1), '--')
+    ax_char[4].axhline(sys_props_v3.reeling_speed_max_limit*oc.bounds_real_scale[4, 1]*1e-3, color='k', ls=':')
+    ax_char[4].set_ylabel('Power [kN]')
+    ax_char[5].plot(df['vw100'], df['ri_power00']*1e-3, '>-', ms=5)
+    ax_char[5].plot(df['vw100'], df['ri_power09']*1e-3, '.-')
+    ax_char[5].plot(df['vw100'], np.amin(df.loc[:, 'ri_power00':'ri_power09']*1e-3, axis=1), '--')
+    ax_char[5].plot(df['vw100'], np.amax(df.loc[:, 'ri_power00':'ri_power09']*1e-3, axis=1), '--')
+
+    ax_char[6].plot(df['vw100'], df['tan_speed_ro00'], '>-', ms=5)
+    ax_char[6].plot(df['vw100'], df['tan_speed_ro04'], '.-')
+    ax_char[6].plot(df['vw100'], np.amin(df.loc[:, 'tan_speed_ro00':'tan_speed_ro04'], axis=1), '--')
+    ax_char[6].plot(df['vw100'], np.amax(df.loc[:, 'tan_speed_ro00':'tan_speed_ro04'], axis=1), '--')
+    ax_char[6].plot(df['vw100'], 300/df['x00'], ':', color='k')
+    ax_char[6].set_ylabel('Tangential\nspeed [m/s]')
+    ax_char[7].plot(df['vw100'], df['tan_speed_ri00'], '>-', ms=5)
+    ax_char[7].plot(df['vw100'], df['tan_speed_ri09'], '.-')
+    ax_char[7].plot(df['vw100'], np.amin(df.loc[:, 'tan_speed_ri00':'tan_speed_ri09'], axis=1), '--')
+    ax_char[7].plot(df['vw100'], np.amax(df.loc[:, 'tan_speed_ri00':'tan_speed_ri09'], axis=1), '--')
+    ax_char[7].axhline(0, color='k', ls=':')
+    ax_char[8].plot(df['vw100'], df['min_height_ro'], '>-', ms=5, label='Start traction')
+    ax_char[8].plot(df['vw100'], df['max_height_ro'], '.-', label='End traction')
+    ax_char[8].plot(df['vw100'], df['max_height_ri'], '--', color='C3', label='Max. retraction')
+    ax_char[8].axhline(100, color='k', ls=':')
+    ax_char[8].axhline(500, color='k', ls=':')
+    ax_char[8].set_ylabel('Kite height [m]')
     ax_char[6].set_xlabel('$v_{w,100m}$ [m/s]')
-    ax_char[5].set_xlabel('$v_{w,100m}$ [m/s]')
+    ax_char[7].set_xlabel('$v_{w,100m}$ [m/s]')
+    ax_char[8].set_xlabel('$v_{w,100m}$ [m/s]')
+
+    mpp_heights_elevated = []
+    for idx, row in df.iterrows():
+        oc = OptimizerReelOutState(sys_props_v3, env_state, elevation_angle=row['x02'], wind_speed=row['vw100'])
+        x_opt = oc.optimize(maxiter=100)
+        print(x_opt[1]*180./np.pi, row['x02']*180./np.pi, x_opt[1]-row['x02'])
+        p, vt, h = oc.eval_point(relax_errors=False)
+        if vt > 9.99:
+            print("HEYYYYHOI")
+        mpp_heights_elevated.append(h)
+
+    mpp_curve_res = mpp_curve(env_state)
+
+    ax_char[8].plot(df['vw100'], mpp_heights_elevated, '*-', color='C4', label='MPP')
+    ax_char[8].plot(mpp_curve_res[0], mpp_curve_res[1], '-.', color='C5', label='MPP')
+    ax_char[8].legend(loc='upper left', bbox_to_anchor=(1, 1.05))
+
 
     for i, a in enumerate(ax_char):
+        if i not in [3, 5]:
+            a.set_ylim([0, None])
+        else:
+            a.set_ylim([None, 0])
+        a.set_xticks(highlight_wind_speeds)
+        if i >= 6:
+            a.set_xticklabels(highlight_labels)
+        else:
+            a.set_xticklabels([])
         a.grid()
-        a.set_ylim([0, None])
-    add_panel_labels(ax_char, .3)
+    add_panel_labels(ax_char, [.3, .20]*5)
 
-    fig = plt.figure(figsize=[7, 2.6])
-    plt.subplots_adjust(left=.126, right=1, top=.95, bottom=.195, wspace=0.15, hspace=.2)
+    fig = plt.figure(figsize=[8, 2.6])
+    plt.subplots_adjust(left=.115, right=.97, top=.95, bottom=.195, wspace=-0.1, hspace=.2)
     spec = fig.add_gridspec(ncols=2, nrows=1, width_ratios=[1, 3], height_ratios=[1])
     ax_profile = fig.add_subplot(spec[0, 0])
     ax_traj = fig.add_subplot(spec[0, 1])
     ax_traj.set_xlabel('Downwind position [m]')
     ax_traj.yaxis.set_ticklabels([])
-    add_panel_labels(np.array([ax_profile, ax_traj]), [.6, .1])
+    add_panel_labels(np.array([ax_profile, ax_traj]), [.5, .1])
 
     env_state.set_reference_wind_speed(1)
     env_state.plot_wind_profile(ax_profile)
     ax_traj.set_aspect('equal')
     ax_traj.grid()
 
-    for i_clr, i in enumerate(range(0, df.shape[0], 3)):
-        ax_traj.plot(df.loc[i, 'x_kite00':'x_kite04'], df.loc[i, 'z_kite00':'z_kite04'], '.-', color='C{}'.format(i_clr), mfc='None')
-        ax_traj.plot(df.loc[i, 'x_kite05':'x_kite14'], df.loc[i, 'z_kite05':'z_kite14'], '.-', color='C{}'.format(i_clr), mfc='None')
+    for i_clr, i in enumerate(highlight_ith_opts):
+        ax_traj.plot(df.loc[i, 'x_kite00':'x_kite04'], df.loc[i, 'z_kite00':'z_kite04'], '.-',
+                     color='C{}'.format(i_clr), mfc='None', label='{:.1f}'.format(df.loc[i, 'vw100']))
+        ax_traj.plot(df.loc[i, 'x_kite05':'x_kite14'], df.loc[i, 'z_kite05':'z_kite14'], '.-',
+                     color='C{}'.format(i_clr), mfc='None')
 
         xf = df.iloc[i]['x_kite14']
         zf = df.iloc[i]['z_kite14']
@@ -1282,6 +1471,9 @@ def plot_curves_and_trajectories(df, env_state):
         beta_f = np.arctan(zf/xf)
         beta = np.linspace(df.iloc[i]['x02'], beta_f, 30)
         ax_traj.plot(np.cos(beta) * l, np.sin(beta) * l, color='C{}'.format(i_clr), lw=.5)
+    ax_traj.set_xlim([0, None])
+    ax_traj.set_ylim([0, None])
+    ax_traj.legend(title='$v_{w,100m}$ [m/s]', loc='upper left', bbox_to_anchor=(1, 1.05))
 
 
 def plot_constraints(df):
