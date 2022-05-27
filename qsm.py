@@ -143,11 +143,11 @@ class LogProfile(EnvAtmosphericPressure):
         h_0 (float): Roughness length [m].
 
     """
-    def __init__(self):
+    def __init__(self, reference_height=100., roughness_length=.1):
         super().__init__(None)
         self.wind_speed_ref = 8.
-        self.h_ref = 100.
-        self.h_0 = 0.005
+        self.h_ref = reference_height
+        self.h_0 = roughness_length  # .1 - onshore & 0.0002 - offshore
 
     def set_reference_height(self, h_ref):
         self.h_ref = h_ref
