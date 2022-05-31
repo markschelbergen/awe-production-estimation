@@ -491,7 +491,7 @@ class OptimizerCycleCutKappa(Optimizer):
     X0_REAL_SCALE_DEFAULT = np.array([30, 20, 15*np.pi/180., 170])
     X0_REAL_SCALE_DEFAULT = np.hstack([X0_REAL_SCALE_DEFAULT, np.ones(N_POINTS_PER_PHASE[0])*2000,
                                        np.ones(N_POINTS_PER_PHASE[1])*1500, np.ones(N_POINTS_PER_PHASE[0])*4,
-                                       np.ones(N_POINTS_PER_PHASE[1])*1.5, [8]])
+                                       np.ones(N_POINTS_PER_PHASE[1])*1.5, [11]])
     SCALING_X_DEFAULT = np.array([1e-2, 1e-2, 1, 1e-3])
     SCALING_X_DEFAULT = np.hstack([SCALING_X_DEFAULT, np.ones(np.sum(N_POINTS_PER_PHASE))*1e-4,
                                    np.ones(np.sum(N_POINTS_PER_PHASE)), [1e-1]])
@@ -1146,7 +1146,6 @@ def construct_power_curve(wind_speed_step=[.01, 1.], power_optimization_limits=2
                 mcps.append(np.nan)
                 success.append(False)
                 wind_speeds.append(vw)
-                vw += wind_speed_step
                 continue
 
         # Collect and write results
@@ -1254,7 +1253,7 @@ def construct_power_curve(wind_speed_step=[.01, 1.], power_optimization_limits=2
     wind_speeds = np.array(wind_speeds)
     success = np.array(success)
     ax_pc.plot(wind_speeds[~success], [0]*np.sum(~success), 'x')
-    ax_pc.set_ylim([0, 1e4])
+    ax_pc.set_ylim([0, None])
 
     ax_vars[0].plot(wind_speeds, opt_vars[:, 0], '.-')
     ax_vars[0].plot(wind_speeds[~success], opt_vars[~success, 0], 'x')
@@ -1330,7 +1329,7 @@ def mpp_curve(env_state, beta_deg=30, vw_step=.5, plot=False):
 
 
 def plot_curves_and_trajectories(df, env_state, reference_height=200):
-    highlight_ith_opts = np.array(range(0, df.shape[0], 3))
+    highlight_ith_opts = np.array(range(0, df.shape[0], 2))
     # highlight_ith_opts = np.array(range(df.shape[0]))
     highlight_ith_opts[-1] = df.index[-1]
     x_col = 'vw{:03d}'.format(reference_height)
@@ -1603,12 +1602,23 @@ if __name__ == "__main__":
         # eval_limit(env_state=env_state, wind_speeds=np.arange(25, 26.5, .5), cut='out')
         # eval_limit(env_state=LogProfile(), wind_speeds=np.arange(21, 23., .5), cut='out')
 
-        if roughness_length == .1:
-            obj_factors_mcp = {'in': -1e-7, 'out': [-5e-6]}
-            wind_speed_step = [.06, 1.]
+        mpp_curve_res = mpp_curve(env_state, beta_deg=None, vw_step=.5, plot=True)
+
+        if sys_props_v3.tether_diameter == 0.004:
+            if roughness_length == .1:
+                obj_factors_mcp = {'in': -1e-7, 'out': [-5e-6]}
+                wind_speed_step = [.06, 1.]
+            else:
+                obj_factors_mcp = {'in': -2e-7, 'out': [-5e-6]}
+                wind_speed_step = [.01, 1.]
+        elif sys_props_v3.tether_diameter == 0.01:  # starting wind speed 11 m/s
+            if roughness_length == .1:
+                obj_factors_mcp = {'in': -1e-7, 'out': []}
+                wind_speed_step = [.07] + [2.]
         else:
-            obj_factors_mcp = {'in': -2e-7, 'out': [-5e-6]}
-            wind_speed_step = [.01, 1.]
+            if roughness_length == .1:
+                obj_factors_mcp = {'in': -2e-7, 'out': [-5e-6]}
+                wind_speed_step = [0.] + [2.]
         df = construct_power_curve(wind_speed_step, obj_factors_mcp=obj_factors_mcp, return_df=True, env_state=env_state)  #, export_file='opt_res_log_profile.csv')  #, power_optimization_limits=26)  #, export_file='opt_res_llj_profile2.csv')
         # df = pd.read_csv('opt_res_log_profile.csv')
         plot_curves_and_trajectories(df, env_state, reference_height)
