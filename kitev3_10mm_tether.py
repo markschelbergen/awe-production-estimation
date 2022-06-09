@@ -35,11 +35,12 @@ sys_props_v3 = {
     'tether_drag_coefficient': 1.1,  # [-]
 }
 tether_force_max_limit = {
-    0.004: 4000,
-    0.006: 8160,
-    0.007: 10800,
-    0.008: 13100,
-    0.01: 21000,
+    0.004: 19.6/5*1e3,
+    0.005: 28.4/5*1e3,
+    0.006: 40.8/5*1e3,
+    0.007: 54./5*1e3,
+    0.008: 65.5/5*1e3,
+    0.01: 105/5*1e3,
 }
 sys_props_v3['tether_force_max_limit'] = tether_force_max_limit[sys_props_v3['tether_diameter']]
 sys_props_v3 = SystemProperties(sys_props_v3)

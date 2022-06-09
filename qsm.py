@@ -11,6 +11,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from copy import copy
 import pandas as pd
+from scipy.interpolate import Akima1DInterpolator
 from utils import zip_el, plot_traces
 
 np.seterr(all='raise')
@@ -145,7 +146,7 @@ class LogProfile(EnvAtmosphericPressure):
     """
     def __init__(self, reference_height=100., roughness_length=.1):
         super().__init__(None)
-        self.wind_speed_ref = 8.
+        self.wind_speed_ref = 1.
         self.h_ref = reference_height
         self.h_0 = roughness_length  # .1 - onshore & 0.0002 - offshore
 
@@ -197,22 +198,21 @@ class NormalisedWindTable1D(EnvAtmosphericPressure):
         normalised_wind_speeds (list of floats): Wind speeds [m/s] corresponding to `height_table`.
 
     """
-    def __init__(self):
+    def __init__(self, heights, normalised_wind_speeds):
         super().__init__(None)
         self.wind_speed_ref = 1.
-        self.h_ref = 100.
-        self.heights = [10., 20., 40., 60., 80., 100., 120., 140., 150., 160., 180., 200., 220., 250., 300., 500., 600.]
-        self.normalised_wind_speeds = [0.33286354, 0.40268717, 0.57391254, 0.68627893, 0.76673997, 0.83025065,
-                                       0.88105483, 0.91921441, 0.93439507, 0.94677456, 0.9690538, 0.98344085,
-                                       0.99278157, 1., 0.99672678, 0.92183803, 0.88490519]
-
-    def set_reference_height(self, h_ref):
-        self.h_ref = h_ref
-        v_norm_ref = np.interp(h_ref, self.heights, self.normalised_wind_speeds, left=np.nan, right=np.nan)
-        self.normalised_wind_speeds = np.array(self.normalised_wind_speeds)/v_norm_ref
+        self.h_ref = 200
+        self.heights = heights
+        self.normalised_wind_speeds = normalised_wind_speeds
+        self.set_reference_height(self.h_ref)
 
     def set_reference_wind_speed(self, v):
         self.wind_speed_ref = v
+
+    def set_reference_height(self, h_ref):
+        self.h_ref = h_ref
+        v_norm_ref = Akima1DInterpolator(self.heights, self.normalised_wind_speeds)(h_ref)
+        self.f = Akima1DInterpolator(self.heights, np.array(self.normalised_wind_speeds)/v_norm_ref)
 
     def calculate(self, height, altitude_ground=0.):
         altitude = height + altitude_ground
@@ -221,11 +221,7 @@ class NormalisedWindTable1D(EnvAtmosphericPressure):
 
     def calculate_wind(self, height):
         # Linear interpolation is used to determine the wind speed between points along the height.
-        v = np.interp(height, self.heights, self.normalised_wind_speeds,
-                      left=np.nan, right=np.nan) * self.wind_speed_ref
-        if height <= 0. or np.isnan(v):
-            # raise OperationalLimitViolation("Invalid height is given: {:.1f}.".format(height))
-            v = 1e-6
+        v = self.f(height) * self.wind_speed_ref
         self.wind_speed = v
         return v
 
@@ -233,11 +229,13 @@ class NormalisedWindTable1D(EnvAtmosphericPressure):
         """Plot the wind speed versus the height above ground."""
         if ax is None:
             ax = plt.figure().gca()
-        wind_speeds = np.array(self.normalised_wind_speeds) * self.wind_speed_ref
-        ax.plot(wind_speeds, self.heights, label=label)
-        ax.set_xlabel('Wind speed [m s$^{-1}$]')
+        heights = np.linspace(0, 600, 100)
+        wind_speeds = [self.calculate_wind(h) for h in heights]
+        ax.plot(wind_speeds, heights)
+        ax.set_xlabel('Wind speed [m/s]')
         ax.set_ylabel('Height [m]')
         ax.set_xlim([0, None])
+        ax.set_ylim([heights[0], heights[-1]])
         ax.grid(True)
         return ax
 
