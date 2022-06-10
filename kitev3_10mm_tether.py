@@ -33,6 +33,7 @@ sys_props_v3 = {
     'reeling_speed_min_limit': 0,  # [m/s] - ratio of 4 between lower and upper limit would reduce generator costs
     'reeling_speed_max_limit': 10,  # [m/s]
     'tether_drag_coefficient': 1.1,  # [-]
+    'reeling_power_max_limit': 40e3,  # [W]
 }
 tether_force_max_limit = {
     0.004: 19.6/5*1e3,

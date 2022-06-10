@@ -397,6 +397,8 @@ class SystemProperties(SysPropsFixedAeroCoeffs):
         self.reeling_speed_max_limit = 8.
         self.tether_force_min_limit = 1200.
         self.tether_force_max_limit = 3200.
+        self.tether_force_max_limit = 3200.
+        self.reeling_power_max_limit = np.inf
 
         # Procedure to set attributes using input dictionary.
         for key, val in props.items():
@@ -1170,8 +1172,6 @@ class OptCycle:
         }
 
         dt_out = duration_out/(self.n_points_per_phase[0]-1)
-        tether_lengths_out = []
-        speeds_out, powers_out, lift_to_drag_errors_out, tangential_speeds_out = [], [], [], []
         steady_states_out, kite_positions_out = [], []
 
         for i, f in enumerate(forces_out):
@@ -1183,8 +1183,6 @@ class OptCycle:
 
             kite_position['straight_tether_length'] = l
             kp = KiteKinematics(**kite_position)
-
-            tether_lengths_out.append(l)
             kite_positions_out.append(kp)
 
             self.system_properties.update(l, True)
@@ -1199,12 +1197,8 @@ class OptCycle:
             # print("speed out", ss_out.reeling_speed)
             steady_states_out.append(ss_out)
 
-            speeds_out.append(ss_out.reeling_speed)
-            powers_out.append(ss_out.power_ground)
-            lift_to_drag_errors_out.append(ss_out.lift_to_drag_error)
-            tangential_speeds_out.append(ss_out.kite_tangential_speed)
-
         time_out = np.linspace(0, duration_out, self.n_points_per_phase[0])
+        powers_out = [ss.power_ground for ss in steady_states_out]
         mean_power_out = np.mean(powers_out)
 
         kite_position = {
@@ -1216,9 +1210,6 @@ class OptCycle:
 
         dt_in = duration_in/(self.n_points_per_phase[1]-1)
 
-        speeds_in, powers_in, lift_to_drag_errors_in = [], [], []
-        tangential_speeds_in, tangential_speed_factors_in = [], []
-        tether_lengths_in, elevations_in = [], []
         steady_states_in, kite_positions_in = [], []
 
         for i, f in enumerate(forces_in):
@@ -1232,9 +1223,6 @@ class OptCycle:
             kite_position['straight_tether_length'] = l
             kite_position['elevation_angle'] = beta
             kp = KiteKinematics(**kite_position)
-
-            tether_lengths_in.append(l)
-            elevations_in.append(beta)
             kite_positions_in.append(kp)
 
             self.system_properties.update(l, False)
@@ -1250,38 +1238,34 @@ class OptCycle:
             # print("speed in", ss_in.reeling_speed)
             steady_states_in.append(ss_in)
 
-            speeds_in.append(ss_in.reeling_speed)
-            powers_in.append(ss_in.power_ground)
-            lift_to_drag_errors_in.append(ss_in.lift_to_drag_error)
-            tangential_speed_factors_in.append(ss_in.tangential_speed_factor)
-            tangential_speeds_in.append(ss_in.kite_tangential_speed)
-
-        # Note different integration technique used than trapz for reel-out
-        # t = np.insert(np.cumsum(np.diff(tether_lengths_in) / np.array(speeds_in[:-1])), 0, 0)
         time_in = np.linspace(0, duration_in, self.n_points_per_phase[1]) + duration_out
+        powers_in = [ss.power_ground for ss in steady_states_in]
         mean_power_in = np.mean(powers_in)
 
         mean_cycle_power = (mean_power_out*duration_out + mean_power_in*duration_in)/(duration_out + duration_in +
                                                                                       dead_time)
+
         res = {
             'mean_cycle_power': mean_cycle_power,
-            'tether_length_end': tether_lengths_in[-1],
+            'tether_length_end': l,
             'out': {
                 'time': time_out,
                 'kite_positions': kite_positions_out,
                 'steady_states': steady_states_out,
-                'reeling_speeds': speeds_out,
-                'tangential_speeds': tangential_speeds_out,
-                'lift_to_drag_errors': lift_to_drag_errors_out,
+                'reeling_speeds': [ss.reeling_speed for ss in steady_states_out],
+                'power': powers_out,
+                'tangential_speeds': [ss.kite_tangential_speed for ss in steady_states_out],
+                'lift_to_drag_errors': [ss.lift_to_drag_error for ss in steady_states_out],
             },
             'in': {
                 'time': time_in,
                 'kite_positions': kite_positions_in,
                 'steady_states': steady_states_in,
-                'reeling_speeds': speeds_in,
-                'tangential_speeds': tangential_speeds_in,
-                'tangential_speed_factors': tangential_speed_factors_in,
-                'lift_to_drag_errors': lift_to_drag_errors_in,
+                'reeling_speeds': [ss.reeling_speed for ss in steady_states_in],
+                'power': powers_in,
+                'tangential_speeds': [ss.kite_tangential_speed for ss in steady_states_in],
+                'tangential_speed_factors': [ss.tangential_speed_factor for ss in steady_states_in],
+                'lift_to_drag_errors': [ss.lift_to_drag_error for ss in steady_states_in],
             },
         }
         return res
