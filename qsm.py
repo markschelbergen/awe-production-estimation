@@ -1155,7 +1155,7 @@ class OptCycle:
         self.chi_r = 1.6249951922452899
         self.n_points_per_phase = [5, 10]
 
-    def run_simulation(self, duration_out, duration_in, elevation_angle_traction=30*np.pi/180., min_tether_length=250, forces_out=5000., forces_in=2000., kappas_out=None, kappas_in=None, relax_errors=True, dead_time=17, wind_speed=None):  #dead_time=17
+    def run_simulation(self, set_out, duration_in, elevation_angle_traction=30*np.pi/180., min_tether_length=250, forces_out=5000., forces_in=2000., kappas_out=None, kappas_in=None, relax_errors=True, dead_time=17, wind_speed=None, param_out='duration'):  #dead_time=17
         if wind_speed is not None:
             self.environment_state.set_reference_wind_speed(wind_speed)
         # Create objects containing the kite position and course angle for reel-out and reel-in.
@@ -1171,14 +1171,19 @@ class OptCycle:
             'course_angle': self.chi_r,  # [rad]
         }
 
-        dt_out = duration_out/(self.n_points_per_phase[0]-1)
+        if param_out == 'duration':
+            duration_out = set_out
+            dt_out = duration_out / (self.n_points_per_phase[0] - 1)
+        else:
+            d_tether_length = set_out/(self.n_points_per_phase[0]-1)
         steady_states_out, kite_positions_out = [], []
 
         for i, f in enumerate(forces_out):
             if i == 0:
                 l = min_tether_length
             else:
-                d_tether_length = ss_out.reeling_speed * dt_out
+                if param_out == 'duration':
+                    d_tether_length = ss_out.reeling_speed * dt_out
                 l += d_tether_length
 
             kite_position['straight_tether_length'] = l
@@ -1197,9 +1202,15 @@ class OptCycle:
             # print("speed out", ss_out.reeling_speed)
             steady_states_out.append(ss_out)
 
-        time_out = np.linspace(0, duration_out, self.n_points_per_phase[0])
         powers_out = [ss.power_ground for ss in steady_states_out]
-        mean_power_out = np.mean(powers_out)
+        if param_out == 'duration':
+            time_out = np.linspace(0, duration_out, self.n_points_per_phase[0])
+            mean_power_out = np.mean(powers_out)
+        else:
+            speeds_out = np.array([ss.reeling_speed for ss in steady_states_out])
+            dts_out = d_tether_length/((speeds_out[:-1] + speeds_out[1:])/2)
+            time_out = np.insert(np.cumsum(dts_out), 0, 0)
+            mean_power_out = np.trapz(powers_out, time_out)
 
         kite_position = {
             'straight_tether_length': 0,
@@ -1238,12 +1249,12 @@ class OptCycle:
             # print("speed in", ss_in.reeling_speed)
             steady_states_in.append(ss_in)
 
-        time_in = np.linspace(0, duration_in, self.n_points_per_phase[1]) + duration_out
+        time_in = np.linspace(0, duration_in, self.n_points_per_phase[1]) + set_out
         powers_in = [ss.power_ground for ss in steady_states_in]
         mean_power_in = np.mean(powers_in)
 
-        mean_cycle_power = (mean_power_out*duration_out + mean_power_in*duration_in)/(duration_out + duration_in +
-                                                                                      dead_time)
+        mean_cycle_power = (mean_power_out * set_out + mean_power_in * duration_in) / (set_out + duration_in +
+                                                                                       dead_time)
 
         res = {
             'mean_cycle_power': mean_cycle_power,
