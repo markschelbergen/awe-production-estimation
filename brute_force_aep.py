@@ -5,7 +5,7 @@ from sklearn.neighbors import NearestNeighbors
 from sklearn.cluster import KMeans
 from qsm import NormalisedWindTable1D
 from cycle_optimizer import OptimizerCycleKappa
-from kitev3_10mm_tether import sys_props_v3
+from kitev3 import sys_props_v3
 from multiprocessing import Process, cpu_count
 
 

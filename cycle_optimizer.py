@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 from utils import add_panel_labels
 
 from qsm import OptCycle, LogProfile, NormalisedWindTable1D, SteadyState, KiteKinematics
-from kitev3_10mm_tether import sys_props_v3
+from kitev3 import sys_props_v3
 
 class OptimizerError(Exception):
     pass
@@ -274,8 +274,8 @@ class OptimizerReelOutState(Optimizer):
     SCALING_X_DEFAULT = np.array([1e-4, 1, 1e-2, 1, 1e-1])
     BOUNDS_REAL_SCALE_DEFAULT = np.array([
         [np.nan, np.nan],
-        [0*np.pi/180, 70.*np.pi/180.],
-        [100, np.inf],
+        [0*np.pi/180, 50.*np.pi/180.],
+        [1, np.inf],
         [0, 15],
         [1, 50],
     ])
@@ -1459,10 +1459,10 @@ def mpp_curve(env_state, beta_deg=30, vw_step=.5, plot=False):
     return vw_range, opt_vars, opt_heights
 
 
-def plot_curves_and_trajectories(df, env_state, reference_height=200):
-    highlight_ith_opts = np.array(range(0, df.shape[0], 2))
+def plot_curves_and_trajectories(df, env_state, reference_height=200, last_i=-1):
+    highlight_ith_opts = np.array(range(0, df.shape[0], 3))
     # highlight_ith_opts = np.array(range(df.shape[0]))
-    highlight_ith_opts[-1] = df.index[-1]
+    highlight_ith_opts[-1] = df.index[last_i]
     x_col = 'vw{:03d}'.format(reference_height)
     x_label = '$v_{{w,{:03d}m}}$ [m/s]'.format(reference_height)
     highlight_wind_speeds = [df.loc[i, x_col] for i in highlight_ith_opts]
@@ -1782,7 +1782,7 @@ def compare_power_curves_tether_diameters():
             obj_factors_mcp = {'in': 0, 'out': -5e-6}
             wind_speed_step = [.01, 1.]
         elif sys_props_v3.tether_diameter == 0.006:
-            obj_factors_mcp = {'in': -2e-7, 'out': -1e-6}
+            obj_factors_mcp = {'in': -2e-7, 'out': -5e-6}
             wind_speed_step = [0.01] + [1.]
         else:
             obj_factors_mcp = {'in': -1e-7, 'out': -5e-6}
@@ -1850,128 +1850,6 @@ def compare_power_curves_tether_diameters():
     plt.show()
 
 
-def compare_power_curves_final_depowering():
-    f_mmc = np.load('density_vw200m_mmc.npy')
-    f_mmij = np.load('density_vw200m_mmij.npy')
-    n_bins = 50
-    w_bin = 30 / n_bins
-    vw_200m_bin_edges = np.linspace(0, 30, n_bins + 1)
-    vw_200m_bin_centers = (vw_200m_bin_edges[1:] + vw_200m_bin_edges[:-1]) / 2
-
-    roughness_length = .1
-    reference_height = 200
-    env_state = LogProfile(reference_height, roughness_length)
-
-    d = 0.006
-    tether_force_max_limit = {
-        0.006: 40.8 / 5 * 1e3,
-    }
-
-    ax = plt.subplots(2, 1, sharex=True)[1]
-    p_avg = np.zeros((2, 2))
-    for i, flag in enumerate([True, False]):
-        sys_props_v3.tether_diameter = d
-        sys_props_v3.tether_force_max_limit = tether_force_max_limit[d]
-        obj_factors_mcp = {'in': -2e-7, 'out': -1e-6}
-        wind_speed_step = [0.01] + [1.]
-
-        df = construct_power_curve(wind_speed_step, obj_factors_mcp=obj_factors_mcp, env_state=env_state, fix_reelout_end=flag)
-        plot_curves_and_trajectories(df, env_state, reference_height)
-        ax[0].plot(df['vw200'], df['mcp'] * 1e-3, label="{:.0f}mm".format(d * 1e3))
-
-        p_bin_centers = np.interp(vw_200m_bin_centers, df['vw200'], df['mcp'], left=0, right=0)
-        p_avg_mmc = np.sum(f_mmc * p_bin_centers * w_bin)
-        p_avg_mmij = np.sum(f_mmij * p_bin_centers * w_bin)
-        print("Cabauw/{:.0f}mm {:.1f}kW".format(d * 1e3, p_avg_mmc * 1e-3))
-        print("IJmuiden/{:.0f}mm {:.1f}kW".format(d * 1e3, p_avg_mmij * 1e-3))
-        p_avg[0, i] = p_avg_mmc
-        p_avg[1, i] = p_avg_mmij
-
-    ax[1].plot(vw_200m_bin_centers, f_mmc, label='Cabauw')
-    ax[1].plot(vw_200m_bin_centers, f_mmij, label='IJmuiden')
-
-    ax[1].set_xlabel("Wind speed @ 200m [m/s]")
-    ax[0].set_ylabel("Mean cycle power [kW]")
-    ax[1].set_ylabel("Probability [-]")
-    ax[0].set_xlim([0, None])
-    for a in ax:
-        a.set_ylim([0, None])
-        a.grid()
-        a.legend()
-
-    plt.figure()
-    plt.bar(np.linspace(0, 1, 2), p_avg[0, :] * 1e-3, label='Cabauw', width=.4)
-    plt.bar(np.linspace(0.4, 1.4, 2), p_avg[1, :] * 1e-3, label='IJmuiden', width=.4)
-    plt.xlabel('Tether diameter [mm]')
-    plt.ylabel('Annual average power [kW]')
-    plt.grid()
-    plt.legend()
-    plt.show()
-
-
-def compare_power_curves_flying_above_mpp():
-    f_mmc = np.load('density_vw200m_mmc.npy')
-    f_mmij = np.load('density_vw200m_mmij.npy')
-    n_bins = 50
-    w_bin = 30 / n_bins
-    vw_200m_bin_edges = np.linspace(0, 30, n_bins + 1)
-    vw_200m_bin_centers = (vw_200m_bin_edges[1:] + vw_200m_bin_edges[:-1]) / 2
-
-    roughness_length = .1
-    reference_height = 200
-    env_state = LogProfile(reference_height, roughness_length)
-
-    d = 0.008
-    tether_force_max_limit = {
-        0.007: 54./5*1e3,
-        0.008: 65.5 / 5 * 1e3,
-        0.009: 87.3 / 5 * 1e3,
-    }
-
-    ax = plt.subplots(2, 1, sharex=True)[1]
-    p_avg = np.zeros((2, 2))
-    for i, flag in enumerate([True, False]):
-        sys_props_v3.tether_diameter = d
-        sys_props_v3.tether_force_max_limit = tether_force_max_limit[d]
-        obj_factors_mcp = {'in': -2e-7, 'out': -1e-6}
-        if d == .008:
-            obj_factors_mcp['in'] = 0.
-        wind_speed_step = [0.01] + [1.]
-
-        df = construct_power_curve(wind_speed_step, obj_factors_mcp=obj_factors_mcp, env_state=env_state, fly_above_mpp=flag)
-        plot_curves_and_trajectories(df, env_state, reference_height)
-        ax[0].plot(df['vw200'], df['mcp'] * 1e-3, label="{:.0f}mm".format(d * 1e3))
-
-        p_bin_centers = np.interp(vw_200m_bin_centers, df['vw200'], df['mcp'], left=0, right=0)
-        p_avg_mmc = np.sum(f_mmc * p_bin_centers * w_bin)
-        p_avg_mmij = np.sum(f_mmij * p_bin_centers * w_bin)
-        print("Cabauw/{:.0f}mm {:.1f}kW".format(d * 1e3, p_avg_mmc * 1e-3))
-        print("IJmuiden/{:.0f}mm {:.1f}kW".format(d * 1e3, p_avg_mmij * 1e-3))
-        p_avg[0, i] = p_avg_mmc
-        p_avg[1, i] = p_avg_mmij
-
-    ax[1].plot(vw_200m_bin_centers, f_mmc, label='Cabauw')
-    ax[1].plot(vw_200m_bin_centers, f_mmij, label='IJmuiden')
-
-    ax[1].set_xlabel("Wind speed @ 200m [m/s]")
-    ax[0].set_ylabel("Mean cycle power [kW]")
-    ax[1].set_ylabel("Probability [-]")
-    ax[0].set_xlim([0, None])
-    for a in ax:
-        a.set_ylim([0, None])
-        a.grid()
-        a.legend()
-
-    plt.figure()
-    plt.bar(np.linspace(0, 1, 2), p_avg[0, :] * 1e-3, label='Cabauw', width=.4)
-    plt.bar(np.linspace(0.4, 1.4, 2), p_avg[1, :] * 1e-3, label='IJmuiden', width=.4)
-    plt.xlabel('Tether diameter [mm]')
-    plt.ylabel('Annual average power [kW]')
-    plt.grid()
-    plt.legend()
-    plt.show()
-
-
 def compare_power_curves_power_limits():
     f_mmc = np.load('density_vw200m_mmc.npy')
     f_mmij = np.load('density_vw200m_mmij.npy')
@@ -2028,10 +1906,9 @@ def compare_power_curves_power_limits():
 
 if __name__ == "__main__":
     # compare_power_curves_flying_above_mpp()
-    compare_power_curves_tether_diameters()
+    # compare_power_curves_tether_diameters()
     # compare_power_curves_power_limits()
     # compare_power_curves_final_depowering()
-    exit()
     for roughness_length in [.1]:  #[.1]:  #, .0002]:
         reference_height = 200
         env_state = LogProfile(reference_height, roughness_length)
@@ -2079,10 +1956,10 @@ if __name__ == "__main__":
                 wind_speed_step = [.07] + [1.]
         else:
             if roughness_length == .1:
-                obj_factors_mcp = {'in': -2e-7, 'out': -5e-6}
+                obj_factors_mcp = {'in': -2e-7, 'out': -1e-6}
                 wind_speed_step = [0.] + [1.]
         df = construct_power_curve(wind_speed_step, obj_factors_mcp=obj_factors_mcp, env_state=env_state)  #, export_file='opt_res_log_profile.csv')  #, power_optimization_limits=26)  #, export_file='opt_res_llj_profile2.csv')
         # df = pd.read_csv('opt_res_log_profile.csv')
-        plot_curves_and_trajectories(df, env_state, reference_height)
+        plot_curves_and_trajectories(df, env_state, reference_height, last_i=-2)
         print('Max. power = {:.3f} kW'.format(df['mcp'].max()*1e-3))
     plt.show()
