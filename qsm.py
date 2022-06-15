@@ -1173,7 +1173,7 @@ class OptCycle:
 
         if param_out == 'duration':
             duration_out = set_out
-            dt_out = duration_out / (self.n_points_per_phase[0] - 1)
+            dt_out = duration_out/(self.n_points_per_phase[0]-1)
         else:
             d_tether_length = set_out/(self.n_points_per_phase[0]-1)
         steady_states_out, kite_positions_out = [], []
@@ -1210,7 +1210,8 @@ class OptCycle:
             speeds_out = np.array([ss.reeling_speed for ss in steady_states_out])
             dts_out = d_tether_length/((speeds_out[:-1] + speeds_out[1:])/2)
             time_out = np.insert(np.cumsum(dts_out), 0, 0)
-            mean_power_out = np.trapz(powers_out, time_out)
+            duration_out = time_out[-1]
+            mean_power_out = np.trapz(powers_out, time_out)/duration_out
 
         kite_position = {
             'straight_tether_length': 0,
@@ -1249,11 +1250,11 @@ class OptCycle:
             # print("speed in", ss_in.reeling_speed)
             steady_states_in.append(ss_in)
 
-        time_in = np.linspace(0, duration_in, self.n_points_per_phase[1]) + set_out
+        time_in = np.linspace(0, duration_in, self.n_points_per_phase[1]) + duration_out
         powers_in = [ss.power_ground for ss in steady_states_in]
         mean_power_in = np.mean(powers_in)
 
-        mean_cycle_power = (mean_power_out * set_out + mean_power_in * duration_in) / (set_out + duration_in +
+        mean_cycle_power = (mean_power_out * duration_out + mean_power_in * duration_in) / (duration_out + duration_in +
                                                                                        dead_time)
 
         res = {

@@ -1086,29 +1086,33 @@ def record_opt_result(env_state, x_opt, cycle_res, eq_cons, ineq_cons):
 
 def post_check_reelout_phase(x_opt, tether_lengths_ro, env, sys):
     tether_forces_ro = x_opt[4:9]
-
     tether_lengths = np.linspace(tether_lengths_ro[0], tether_lengths_ro[-1], 100)
-    powers = []
-    heights = []
-    for l in tether_lengths:
-        tether_force = np.interp(l, tether_lengths_ro, tether_forces_ro)
 
-        kp = {
-            'straight_tether_length': l,
-            'azimuth_angle': 0.2012354421510459,  # [rad]
-            'elevation_angle': x_opt[2],
-            'course_angle': 1.6249951922452899,  # [rad]
-        }
-        kp = KiteKinematics(**kp)
+    ax = plt.subplots(1, 2, sharey=True)[1]
+    for f, ls in zip([.99, 1.01, 1], ['<-', '>-', '-']):
+        powers, forces, heights = [], [], []
+        for l in tether_lengths:
+            tether_force = np.interp(l, tether_lengths_ro, tether_forces_ro*f)
 
-        sys.update(l, True)
-        env.calculate(kp.z)
+            kp = {
+                'straight_tether_length': l,
+                'azimuth_angle': 0.2012354421510459,  # [rad]
+                'elevation_angle': x_opt[2],
+                'course_angle': 1.6249951922452899,  # [rad]
+            }
+            kp = KiteKinematics(**kp)
 
-        ss = SteadyState()
-        ss.control_settings = ('tether_force_ground', tether_force)
-        ss.find_state(sys, env, kp)
-        powers.append(ss.power_ground)
-        heights.append(kp.z)
+            sys.update(l, True)
+            env.calculate(kp.z)
+
+            ss = SteadyState()
+            ss.control_settings = ('tether_force_ground', tether_force)
+            ss.find_state(sys, env, kp)
+            powers.append(ss.power_ground)
+            forces.append(tether_force)
+            heights.append(kp.z)
+        ax[0].plot(forces, heights, ls)
+        ax[1].plot(powers, heights, ls)
 
     power_lim = sys_props_v3.reeling_power_max_limit
     print("Power limit exceeded with = {:.1f}% ".format((max(powers)-power_lim)/power_lim * 100))
@@ -1196,25 +1200,10 @@ def construct_power_curve(wind_speed_step=[.01, 1.], power_optimization_limits=2
         vw += wind_speed_step[min((i, len(wind_speed_step)-1))]
         env_state.set_reference_wind_speed(vw)
 
-        if fly_above_mpp:
-            print("Trying depowering by flying higher")
-            oc_ros = OptimizerReelOutState(sys_props_v3, env_state, elevation_angle=50*np.pi/180.,
-                                           wind_speed=vw)
-            oc_ros.optimize(maxiter=100)
-            mhro = oc_ros.eval_point(relax_errors=False)[2]
-            print("Min. height {:.1f} m - wind speed = {:.2f} m/s".format(mhro, vw))
-        else:
-            mhro = 0
-            print("Wind speed = {:.2f} m/s".format(vw))
-
-        if vw > 19:
-            fre = fix_reelout_end
-        else:
-            fre = False
-        oc = OptimizerCycleKappa(sys_props_v3, env_state, fre, mhro)
+        print("Wind speed = {:.2f} m/s".format(vw))
+        oc = OptimizerCycleKappa(sys_props_v3, env_state)
 
         oc.x0_real_scale = x0_next
-        # oc.x0_real_scale[4:9] = oc.x0_real_scale[4:9]*.95
         try:
             oc.optimize(maxiter=maxiter)
         except (FloatingPointError, OptimizerError):
@@ -1244,8 +1233,8 @@ def construct_power_curve(wind_speed_step=[.01, 1.], power_optimization_limits=2
                     print("Inequality constraints:", ineq_cons)
                     success_flag = False
                 else:
-                    # Post checking solution
-                    post_check_reelout_phase(oc.x_opt_real_scale, [kp.straight_tether_length for kp in cycle_res['out']['kite_positions']], env_state, sys_props_v3)
+                    # if oc.x_opt_real_scale[2] > 49.9*np.pi/180.:  # Post checking solution
+                    #     post_check_reelout_phase(oc.x_opt_real_scale, [kp.straight_tether_length for kp in cycle_res['out']['kite_positions']], env_state, sys_props_v3)
                     record = record_opt_result(env_state, oc.x_opt_real_scale, cycle_res, eq_cons, ineq_cons)
                     succeeded_opts = succeeded_opts.append(record, ignore_index=True)
                     success_flag = True
@@ -1279,34 +1268,23 @@ def construct_power_curve(wind_speed_step=[.01, 1.], power_optimization_limits=2
                 for a, x in zip(ax_vars, oc.x_opt_real_scale[:4]*np.array([1, 1, 180./np.pi, 1])): a.plot(vw, x, 's', color='C{}'.format(i_clr), mfc='None')
             success_counter += 1
 
-            # if oc.x_opt_real_scale[2] >= oc.bounds_real_scale[2, 1] - 1e-6:
-            #     max_elevation_reached = True
-            #     break
             x0_next = oc.x_opt_real_scale
             vw0_next = vw
 
         if not success_flag and vw > power_optimization_limits:
             break
+
         i += 1
 
     # Run cut-out optimizations
     while True:
-        if fly_above_mpp:
-            oc_ros = OptimizerReelOutState(sys_props_v3, env_state, elevation_angle=50*np.pi/180.,
-                                           wind_speed=vw)
-            oc_ros.optimize(maxiter=100)
-            mhro = oc_ros.eval_point(relax_errors=False)[2]
-            print("Min. height {:.1f} m - wind speed = {:.2f} m/s".format(mhro, vw))
-        else:
-            mhro = 0
-
-        oc_co = OptimizerCycleCutKappa(sys_props_v3, env_state, [-1e-2, obj_factors_mcp['out']],
-                                       fix_reelout_end=fix_reelout_end, min_height_reelout=mhro)
+        oc_co = OptimizerCycleCutKappa(sys_props_v3, env_state, [-1e-2, obj_factors_mcp['out']])
         oc_co.bounds_real_scale[-1, 1] = vw
         oc_co.x0_real_scale = np.hstack([x0_next, vw0_next])
         oc_co.optimize(maxiter=maxiter)
         assert oc_co.op_res['success'], "Cut-out optimization failed"
         if oc_co.x_opt_real_scale[-1] < vw0_next:
+            vw = vw0_next
             print("Wind speed found ({:.2f}) smaller than starting wind speed ({:.2f})"
                   .format(oc_co.x_opt_real_scale[-1], vw0_next))
             break
@@ -1317,8 +1295,8 @@ def construct_power_curve(wind_speed_step=[.01, 1.], power_optimization_limits=2
         # Collect and write cut-out results
         cycle_res = oc_co.eval_point()
         print("Mean cycle power = {:.2f}".format(cycle_res['mean_cycle_power']))
-        # Post checking solution
-        post_check_reelout_phase(oc_co.x_opt_real_scale, [kp.straight_tether_length for kp in cycle_res['out']['kite_positions']], env_state, sys_props_v3)
+        # # Post checking solution
+        # post_check_reelout_phase(oc_co.x_opt_real_scale, [kp.straight_tether_length for kp in cycle_res['out']['kite_positions']], env_state, sys_props_v3)
 
         cons = oc_co.eval_point(relax_errors=True)[1]
         eq_cons = cons[:oc_co.N_EQ_CONS]
@@ -1347,69 +1325,15 @@ def construct_power_curve(wind_speed_step=[.01, 1.], power_optimization_limits=2
             for a, x in zip(ax_vars, oc_co.x_opt_real_scale[:4]*np.array([1, 1, 180./np.pi, 1])): a.plot(oc_co.x_opt_real_scale[-1], x, 's', color='C{}'.format(i_clr), mfc='None')
         success_counter += 1
 
+        i += 1
+        x0_next = oc_co.x_opt_real_scale[:-1]
         if oc_co.x_opt_real_scale[-1] < vw-1e-3:
             print("Stopping cut-out optimizations at vw={:.3f}m/s".format(vw))
+            vw = oc_co.x_opt_real_scale[-1]
             break
-        i += 1
-        vw0_next = vw
-        x0_next = oc_co.x_opt_real_scale[:-1]
-        vw += wind_speed_step[min((i, len(wind_speed_step)-1))]
-
-    # # idx_tan_reelout_end = oc.INEQ_CONS_LABELS.index('Min. tangential speed out 5')
-    # # if ineq_cons[idx_tan_reelout_end] > gtol:
-    # if True:
-    #     print("Trying depowering by flying higher")
-    #     oc_ros = OptimizerReelOutState(sys_props_v3, env_state, elevation_angle=oc.bounds_real_scale[2, 1], wind_speed=vw)
-    #     oc_ros.optimize(maxiter=100)
-    #     min_height_ro = oc_ros.eval_point(relax_errors=False)[2]
-    #     print("Min. height {:.1f} m - wind speed = {:.2f} m/s".format(min_height_ro, vw))
-    #
-    #     env_state.set_reference_wind_speed(vw)
-    #     oc = OptimizerCycleKappa(sys_props_v3, env_state, min_height_reelout=min_height_ro)
-    #     oc.x0_real_scale = x0_next
-    #     oc.optimize(maxiter=maxiter)
-    #
-    #     # Collect and write results
-    #     if oc.op_res['success']:  # or oc.op_res.get('exit_mode', -1) == 9:
-    #         try:
-    #             cycle_res = oc.eval_point()
-    #             cons = oc.eval_point(relax_errors=True)[1]
-    #             eq_cons = cons[:oc.N_EQ_CONS]
-    #             ineq_cons = cons[oc.N_EQ_CONS:]
-    #             print("Mean cycle power = {:.2f}".format(cycle_res.get('mean_cycle_power', np.nan)))
-    #             print("Max. abs. equality constraints:", np.max(np.abs(eq_cons)))
-    #             print("Min. inequality constraint:", np.min(ineq_cons))
-    #             if np.max(np.abs(eq_cons)) > gtol or np.min(ineq_cons) < -gtol:
-    #                 print("CONSTRAINTS VIOLATED")
-    #                 print("Equality constraints:", eq_cons)
-    #                 print("Inequality constraints:", ineq_cons)
-    #                 success_flag = False
-    #             else:
-    #                 record = record_opt_result(env_state, oc.x_opt_real_scale, cycle_res, eq_cons, ineq_cons)
-    #                 succeeded_opts = succeeded_opts.append(record, ignore_index=True)
-    #                 success_flag = True
-    #         except:
-    #             print("Evaluation of objective function failed despite successful optimization.")
-    #             cycle_res = {}
-    #             success_flag = False
-    #     else:
-    #         success_flag = False
-    #         cycle_res = {}
-    #
-    #     opt_vars = np.vstack((opt_vars, oc.x_opt_real_scale[:4]))
-    #     mcps.append(cycle_res.get('mean_cycle_power', np.nan))
-    #     success.append(success_flag)
-    #     wind_speeds.append(vw)
-
-    # x0_next = oc_co.x_opt_real_scale[:-1]
-    # vw = oc_co.x_opt_real_scale[-1]
-    # print("Wind speed = {:.2f} m/s".format(vw))
-    # env_state.set_reference_wind_speed(vw)
-    # oc = OptimizerCycleKappa(sys_props_v3, env_state)
-    # oc.x0_real_scale = x0_next
-    # oc.optimize(maxiter=maxiter)
-    # cycle_res = oc.eval_point()
-    # print("Mean cycle power = {:.2f}".format(cycle_res.get('mean_cycle_power', np.nan)))
+        else:
+            vw0_next = vw
+            vw += wind_speed_step[min((i, len(wind_speed_step)-1))]
 
     if plot:
         #Power curve
@@ -1465,11 +1389,21 @@ def redo_opts(previous_opts, env_state, maxiter=300):
             print("Max. abs. equality constraints:", np.max(np.abs(eq_cons)))
             print("Min. inequality constraint:", np.min(ineq_cons))
             if not (np.max(np.abs(eq_cons)) > gtol or np.min(ineq_cons) < -gtol):
-                post_check_reelout_phase(oc.x_opt_real_scale, [kp.straight_tether_length for kp in cycle_res['out']['kite_positions']], env_state, sys_props_v3)
+                # post_check_reelout_phase(oc.x_opt_real_scale, [kp.straight_tether_length for kp in cycle_res['out']['kite_positions']], env_state, sys_props_v3)
                 record = record_opt_result(env_state, oc.x_opt_real_scale, cycle_res, eq_cons, ineq_cons)
                 succeeded_opts = succeeded_opts.append(record, ignore_index=True)
 
     return succeeded_opts
+
+
+def construct_hybrid_power_curve(wind_speed_step, obj_factors_mcp, env_state):
+    df = construct_power_curve(wind_speed_step, obj_factors_mcp=obj_factors_mcp, env_state=env_state)
+    sys_props_v3.tether_force_max_limit = 8e3
+    df2 = construct_power_curve(wind_speed_step, obj_factors_mcp=obj_factors_mcp, env_state=env_state)
+    df2 = redo_opts(df2, env_state)
+
+    df = pd.concat([df, df2[df2['vw200'] > df['vw200'].iloc[-1]]], ignore_index=True)
+    return df
 
 
 def mpp_curve(env_state, beta_deg=30, vw_step=.5, plot=False):
@@ -1829,7 +1763,6 @@ def compare_power_curves_tether_diameters():
         0.004: 19.6/5*1e3,
         0.005: 28.4/5*1e3,
         0.006: 40.8/5*1e3,
-        # 0.0065: (40.8+54.)/10*1e3,
         0.007: 54./5*1e3,
         0.008: 65.5/5*1e3,
         0.009: 87.3/5*1e3,
@@ -1838,6 +1771,10 @@ def compare_power_curves_tether_diameters():
 
     ax = plt.subplots(2, 1, sharex=True)[1]
     p_avg = np.zeros((2, len(diameters)))
+
+    # ax_vars = plt.subplots(3, 2, figsize=[8, 4], sharex=True)[1].reshape(-1)
+    # plt.subplots_adjust(left=.13, bottom=.136, right=.98, top=.98, wspace=.37)
+
     for i, d in enumerate(diameters):
         sys_props_v3.tether_diameter = d
         sys_props_v3.tether_force_max_limit = tether_force_max_limit[d]
@@ -1858,7 +1795,10 @@ def compare_power_curves_tether_diameters():
         #     obj_factors_mcp = {'in': 0., 'out': -5e-6}
         #     wind_speed_step = [.01, 1.]
 
-        df = construct_power_curve(wind_speed_step, obj_factors_mcp=obj_factors_mcp, env_state=env_state)
+        if 0.006 < d < .1:
+            df = construct_hybrid_power_curve(wind_speed_step, obj_factors_mcp=obj_factors_mcp, env_state=env_state)
+        else:
+            df = construct_power_curve(wind_speed_step, obj_factors_mcp=obj_factors_mcp, env_state=env_state)
         plot_curves_and_trajectories(df, env_state, reference_height)
         idx = (df['x02'] > 49.9*np.pi/180.).idxmax()
         if idx == 0:
@@ -1874,6 +1814,19 @@ def compare_power_curves_tether_diameters():
         print("IJmuiden/{:.0f}mm {:.1f}kW".format(d*1e3, p_avg_mmij*1e-3))
         p_avg[0, i] = p_avg_mmc
         p_avg[1, i] = p_avg_mmij
+
+        # ax_vars[0].plot(df['vw200'], df['x00'], '-')
+        # ax_vars[0].set_ylabel('Duration trac-\ntion phase [s]')
+        # ax_vars[1].plot(df['vw200'], df['x01'], '-')
+        # ax_vars[1].set_ylabel('Duration retrac\n-tion phase [s]')
+        # ax_vars[2].plot(df['vw200'], df['x02'] * 180. / np.pi, '-')
+        # ax_vars[2].set_ylabel('Elevation\nangle [$^\circ$]')
+        # ax_vars[3].plot(df['vw200'], df['x03'], '-')
+        # ax_vars[3].set_ylabel('Min. tether\nlength [m]')
+        # ax_vars[4].plot(df['vw200'], df['max_height_ro'], label='End traction')
+        # ax_vars[4].set_ylabel('Max. height [m]')
+        # ax_vars[4].set_xlabel('vw200')
+        # ax_vars[5].set_xlabel('vw200')
 
     ax[1].plot(vw_200m_bin_centers, f_mmc, label='Cabauw')
     ax[1].plot(vw_200m_bin_centers, f_mmij, label='IJmuiden')
