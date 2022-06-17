@@ -275,7 +275,7 @@ class OptimizerReelOutState(Optimizer):
     BOUNDS_REAL_SCALE_DEFAULT = np.array([
         [np.nan, np.nan],
         [0*np.pi/180, 50.*np.pi/180.],
-        [1, np.inf],
+        [1, 1000],
         [0, 15],
         [1, 50],
     ])
@@ -514,7 +514,7 @@ class OptimizerCycleCutKappa(Optimizer):
         [1, 500],
         [20, 300],
         [0*np.pi/180, 50.*np.pi/180.],
-        [100, np.inf],
+        [100, 500],
     ])
     BOUNDS_REAL_SCALE_DEFAULT = np.append(BOUNDS_REAL_SCALE_DEFAULT, np.empty((np.sum(N_POINTS_PER_PHASE), 2))*np.nan, axis=0)
     BOUNDS_REAL_SCALE_DEFAULT = np.append(BOUNDS_REAL_SCALE_DEFAULT, np.array([[0, 15]] * np.sum(N_POINTS_PER_PHASE)), axis=0)
@@ -1459,14 +1459,14 @@ def mpp_curve(env_state, beta_deg=30, vw_step=.5, plot=False):
     return vw_range, opt_vars, opt_heights
 
 
-def plot_curves_and_trajectories(df, env_state, reference_height=200, last_i=-1):
-    highlight_ith_opts = np.array(range(0, df.shape[0], 3))
+def plot_curves_and_trajectories(df, env_state, reference_height=200, last_i=-1, marker=True, tick_nth_opts=3):
+    tick_opts = np.array(range(0, df.shape[0], tick_nth_opts))
     # highlight_ith_opts = np.array(range(df.shape[0]))
-    highlight_ith_opts[-1] = df.index[last_i]
+    tick_opts[-1] = df.index[last_i]
     x_col = 'vw{:03d}'.format(reference_height)
     x_label = '$v_{{w,{:03d}m}}$ [m/s]'.format(reference_height)
-    highlight_wind_speeds = [df.loc[i, x_col] for i in highlight_ith_opts]
-    highlight_labels = ["{:.1f}".format(v) for v in highlight_wind_speeds]
+    tick_wind_speeds = [df.loc[i, x_col] for i in tick_opts]
+    tick_labels = ["{:.1f}".format(v) for v in tick_wind_speeds]
 
     oc = OptimizerCycleKappa(sys_props_v3, env_state)
 
@@ -1500,14 +1500,23 @@ def plot_curves_and_trajectories(df, env_state, reference_height=200, last_i=-1)
     for i, a in enumerate(ax_vars):
         if i > 0:
             a.set_ylim([0, None])
-        a.set_xticks(highlight_wind_speeds)
-        a.set_xticklabels(highlight_labels)
+        a.set_xticks(tick_wind_speeds)
+        a.set_xticklabels(tick_labels)
         a.grid()
     add_panel_labels(ax_vars, .35)
 
     fig = plt.figure(figsize=[8, 7])
     plt.subplots_adjust(left=.12, bottom=.07, right=.99, top=.9, wspace=1.3, hspace=.17)
     spec = fig.add_gridspec(ncols=6, nrows=6, height_ratios=[1, 1, 1, 1, .4, 1])
+
+    if marker is True:
+        ls0 = '>-'
+        lsf = '.-'
+        ls_mpp = '*-'
+    else:
+        ls0 = '-'
+        lsf = '-'
+        ls_mpp = '-'
 
     ax_char = []
     for i in range(8):
@@ -1521,8 +1530,8 @@ def plot_curves_and_trajectories(df, env_state, reference_height=200, last_i=-1)
 
     ax_char[0].set_title("Traction phase")
     ax_char[1].set_title("Retraction phase")
-    ax_char[0].plot(df[x_col], df['x04']*1e-3, '>-', ms=5, label='Start')
-    ax_char[0].plot(df[x_col], df['x08']*1e-3, '.-', label='End')
+    ax_char[0].plot(df[x_col], df['x04']*1e-3, ls0, ms=5, label='Start')
+    ax_char[0].plot(df[x_col], df['x08']*1e-3, lsf, label='End')
     ax_char[0].plot(df[x_col], np.amin(df.loc[:, 'x04':'x08'], axis=1)*1e-3, '--', label='Min.')
     ax_char[0].plot(df[x_col], np.amax(df.loc[:, 'x04':'x08'], axis=1)*1e-3, '--', label='Max.')
     ax_char[0].plot(df[x_col], [np.nan]*len(df[x_col]), label='Mean', lw=1)
@@ -1532,28 +1541,28 @@ def plot_curves_and_trajectories(df, env_state, reference_height=200, last_i=-1)
     ax_char[0].legend(bbox_to_anchor=(0.2, 1.35, 1.85, .5), loc="lower left", mode="expand",
                       borderaxespad=0, ncol=6)
 
-    ax_char[1].plot(df[x_col], df['x09']*1e-3, '>-', ms=5)
-    ax_char[1].plot(df[x_col], df['x18']*1e-3, '.-')
+    ax_char[1].plot(df[x_col], df['x09']*1e-3, ls0, ms=5)
+    ax_char[1].plot(df[x_col], df['x18']*1e-3, lsf)
     ax_char[1].plot(df[x_col], np.amin(df.loc[:, 'x09':'x18'], axis=1)*1e-3, '--')
     ax_char[1].plot(df[x_col], np.amax(df.loc[:, 'x09':'x18'], axis=1)*1e-3, '--')
     ax_char[1].axhline(oc.bounds_real_scale[9, 0] * 1e-3, color='k', ls=':')
     ax_char[1].axhline(oc.bounds_real_scale[9, 1] * 1e-3, color='k', ls=':')
 
-    ax_char[2].plot(df[x_col], df['ro_speed00'], '>-', ms=5)
-    ax_char[2].plot(df[x_col], df['ro_speed04'], '.-')
+    ax_char[2].plot(df[x_col], df['ro_speed00'], ls0, ms=5)
+    ax_char[2].plot(df[x_col], df['ro_speed04'], lsf)
     ax_char[2].plot(df[x_col], np.amin(df.loc[:, 'ro_speed00':'ro_speed04'], axis=1), '--')
     ax_char[2].plot(df[x_col], np.amax(df.loc[:, 'ro_speed00':'ro_speed04'], axis=1), '--')
     ax_char[2].axhline(sys_props_v3.reeling_speed_min_limit, color='k', ls=':')
     ax_char[2].axhline(sys_props_v3.reeling_speed_max_limit, color='k', ls=':')
     ax_char[2].set_ylabel('Reeling\nspeed [m/s]')
-    ax_char[3].plot(df[x_col], df['ri_speed00'], '>-', ms=5)
-    ax_char[3].plot(df[x_col], df['ri_speed09'], '.-')
+    ax_char[3].plot(df[x_col], df['ri_speed00'], ls0, ms=5)
+    ax_char[3].plot(df[x_col], df['ri_speed09'], lsf)
     ax_char[3].plot(df[x_col], np.amin(df.loc[:, 'ri_speed00':'ri_speed09'], axis=1), '--')
     ax_char[3].plot(df[x_col], np.amax(df.loc[:, 'ri_speed00':'ri_speed09'], axis=1), '--')
     ax_char[3].axhline(-sys_props_v3.reeling_speed_max_limit, color='k', ls=':')
 
-    ax_char[4].plot(df[x_col], df['ro_power00']*1e-3, '>-', ms=5)
-    ax_char[4].plot(df[x_col], df['ro_power04']*1e-3, '.-')
+    ax_char[4].plot(df[x_col], df['ro_power00']*1e-3, ls0, ms=5)
+    ax_char[4].plot(df[x_col], df['ro_power04']*1e-3, lsf)
     ax_char[4].plot(df[x_col], np.amin(df.loc[:, 'ro_power00':'ro_power04']*1e-3, axis=1), '--')
     ax_char[4].plot(df[x_col], np.amax(df.loc[:, 'ro_power00':'ro_power04']*1e-3, axis=1), '--')
     ax_char[4].plot(df[x_col], df['mean_ro_power']*1e-3, lw=1)
@@ -1566,26 +1575,26 @@ def plot_curves_and_trajectories(df, env_state, reference_height=200, last_i=-1)
     ax_char[4].axhline(power_limit*1e-3, color='k', ls=':')
     ax_char[4].set_ylabel('Power [kW]')
 
-    ax_char[5].plot(df[x_col], df['ri_power00']*1e-3, '>-', ms=5)
-    ax_char[5].plot(df[x_col], df['ri_power09']*1e-3, '.-')
+    ax_char[5].plot(df[x_col], df['ri_power00']*1e-3, ls0, ms=5)
+    ax_char[5].plot(df[x_col], df['ri_power09']*1e-3, lsf)
     ax_char[5].plot(df[x_col], np.amin(df.loc[:, 'ri_power00':'ri_power09']*1e-3, axis=1), '--')
     ax_char[5].plot(df[x_col], np.amax(df.loc[:, 'ri_power00':'ri_power09']*1e-3, axis=1), '--')
     ax_char[5].plot(df[x_col], df['mean_ri_power']*1e-3, lw=1)
     ax_char[5].axhline(-power_limit*1e-3, color='k', ls=':')
 
-    ax_char[6].plot(df[x_col], df['tan_speed_ro00'], '>-', ms=5)
-    ax_char[6].plot(df[x_col], df['tan_speed_ro04'], '.-')
+    ax_char[6].plot(df[x_col], df['tan_speed_ro00'], ls0, ms=5)
+    ax_char[6].plot(df[x_col], df['tan_speed_ro04'], lsf)
     ax_char[6].plot(df[x_col], np.amin(df.loc[:, 'tan_speed_ro00':'tan_speed_ro04'], axis=1), '--')
     ax_char[6].plot(df[x_col], np.amax(df.loc[:, 'tan_speed_ro00':'tan_speed_ro04'], axis=1), '--')
     ax_char[6].plot(df[x_col], 300/df['x00'], ':', color='k')
     ax_char[6].set_ylabel('Tangential\nspeed [m/s]')
-    ax_char[7].plot(df[x_col], df['tan_speed_ri00'], '>-', ms=5)
-    ax_char[7].plot(df[x_col], df['tan_speed_ri09'], '.-')
+    ax_char[7].plot(df[x_col], df['tan_speed_ri00'], ls0, ms=5)
+    ax_char[7].plot(df[x_col], df['tan_speed_ri09'], lsf)
     ax_char[7].plot(df[x_col], np.amin(df.loc[:, 'tan_speed_ri00':'tan_speed_ri09'], axis=1), '--')
     ax_char[7].plot(df[x_col], np.amax(df.loc[:, 'tan_speed_ri00':'tan_speed_ri09'], axis=1), '--')
     ax_char[7].axhline(0, color='k', ls=':')
-    ax_char[8].plot(df[x_col], df['min_height_ro'], '>-', ms=5, label='Start traction')
-    ax_char[8].plot(df[x_col], df['max_height_ro'], '.-', label='End traction')
+    ax_char[8].plot(df[x_col], df['min_height_ro'], ls0, ms=5, label='Start traction')
+    ax_char[8].plot(df[x_col], df['max_height_ro'], lsf, label='End traction')
     ax_char[8].plot(df[x_col], df['max_height_ri'], '--', color='C3', label='Max. retraction')
     ax_char[8].axhline(100, color='k', ls=':')
     ax_char[8].axhline(500, color='k', ls=':')
@@ -1624,7 +1633,7 @@ def plot_curves_and_trajectories(df, env_state, reference_height=200, last_i=-1)
         # mpp_height = post_check_reelout_phase(row['x00':'x33'], tether_lengths_ro, env_state, sys_props_v3)
         # mpp_heights_elevated.append(mpp_height)
 
-    ax_char[8].plot(df[x_col], mpp_heights_elevated, '*-', color='C5', label=r'Max. power point $\beta^*$')
+    ax_char[8].plot(df[x_col], mpp_heights_elevated, ls_mpp, color='C5', label=r'Max. power point $\beta^*$')
     ax_char[8].legend(loc='upper left', bbox_to_anchor=(1, 1.15))
 
     for i, a in enumerate(ax_char):
@@ -1632,9 +1641,9 @@ def plot_curves_and_trajectories(df, env_state, reference_height=200, last_i=-1)
             a.set_ylim([0, None])
         else:
             a.set_ylim([None, 0])
-        a.set_xticks(highlight_wind_speeds)
+        a.set_xticks(tick_wind_speeds)
         if i >= 6:
-            a.set_xticklabels(highlight_labels)
+            a.set_xticklabels(tick_labels)
         else:
             a.set_xticklabels([])
         a.grid()
@@ -1656,7 +1665,7 @@ def plot_curves_and_trajectories(df, env_state, reference_height=200, last_i=-1)
     ax_traj.set_aspect('equal')
     ax_traj.grid()
 
-    for i_clr, i in enumerate(highlight_ith_opts):
+    for i_clr, i in enumerate(tick_opts):
         ax_traj.plot(df.loc[i, 'x_kite00':'x_kite04'], df.loc[i, 'z_kite00':'z_kite04'], '.-',
                      color='C{}'.format(i_clr), mfc='None', label='{:.1f}'.format(df.loc[i, x_col]))
         ax_traj.plot(df.loc[i, 'x_kite05':'x_kite14'], df.loc[i, 'z_kite05':'z_kite14'], '.-',
@@ -1725,24 +1734,37 @@ def run_opt_for_shapes(loc='mmc'):
         roughness_length = 0.1
     reference_height = 200
     env_state = LogProfile(reference_height, roughness_length)
-    env_state.plot_wind_profile(ax=ax_profiles)
-    obj_factors_mcp = {'in': -2e-7, 'out': []}
-    wind_speed_step = [0., .4]
-    df = construct_power_curve(wind_speed_step, obj_factors_mcp=obj_factors_mcp, env_state=env_state,
-                               export_file='opt_res_{}/opt_res_{}1.csv'.format(loc, loc))
-    ax_power_curves.plot(df['vw200'], df['mcp'])
+    env_state.plot_wind_profile(ax=ax_profiles, color='k')
+    obj_factors_mcp = {'in': -2e-7, 'out': -5e-6}
+    wind_speed_step = [0., .5]
+    # df = construct_power_curve(wind_speed_step, obj_factors_mcp=obj_factors_mcp, env_state=env_state,
+    #                            export_file='opt_res_{}/opt_res_{}1.csv'.format(loc, loc))
+    # ax_power_curves.plot(df['vw200'], df['mcp'], '.-', color='k')
 
     h = [0., 20., 40., 60., 80., 100., 120., 140., 150., 160., 180., 200., 220., 250., 300., 500., 600.]
     hand_picked_shapes = np.load("hand_picked_shapes_{}.npy".format(loc))
-    for i, vw_norm in enumerate(hand_picked_shapes):
+    # obj_factors_mcp['in'] = 0.
+    for i, vw_norm in enumerate(hand_picked_shapes[3:, :]):
         vw_norm[0] = 0.
 
         env_state = NormalisedWindTable1D(h, vw_norm)
         env_state.plot_wind_profile(ax=ax_profiles)
-        df = construct_power_curve([0., .4], obj_factors_mcp={'in': 0, 'out': []}, env_state=env_state,
+        df = construct_power_curve(wind_speed_step, obj_factors_mcp=obj_factors_mcp, env_state=env_state,
                                    export_file='opt_res_{}/opt_res_{}{}.csv'.format(loc, loc, i+2))
-        ax_power_curves.plot(df['vw200'], df['mcp'])
+        plot_curves_and_trajectories(df, env_state, marker=False, tick_nth_opts=8)
+        ax_power_curves.plot(df['vw200'], df['mcp'], '.-')
     plt.show()
+
+
+def power_curve_thesis_plots():
+    roughness_length = .1
+    reference_height = 200
+    env_state = LogProfile(reference_height, roughness_length)
+    obj_factors_mcp = {'in': -2e-7, 'out': -1e-6}
+    wind_speed_step = [0.] + [1.]
+    df = construct_power_curve(wind_speed_step, obj_factors_mcp=obj_factors_mcp, env_state=env_state)
+    plot_curves_and_trajectories(df, env_state, reference_height, last_i=-2)
+    print('Max. power = {:.3f} kW'.format(df['mcp'].max()*1e-3))
 
 
 def compare_power_curves_tether_diameters():
@@ -1905,61 +1927,6 @@ def compare_power_curves_power_limits():
 
 
 if __name__ == "__main__":
-    # compare_power_curves_flying_above_mpp()
     # compare_power_curves_tether_diameters()
     # compare_power_curves_power_limits()
-    # compare_power_curves_final_depowering()
-    for roughness_length in [.1]:  #[.1]:  #, .0002]:
-        reference_height = 200
-        env_state = LogProfile(reference_height, roughness_length)
-        # env_state = NormalisedWindTable1D()
-        # h = [10., 20., 40., 60., 80., 100., 120., 140., 150., 160., 180., 200., 220., 250., 300., 500., 600.]
-        # v = [0.31916794, 0.38611869, 0.55029902, 0.65804212, 0.73519261, 0.79609015,
-        #      0.84480401, 0.88139352, 0.89594957, 0.90781971, 0.92918228, 0.94297737,
-        #      0.95193377, 0.9588552, 0.95571666, 0.88390919, 0.84849594]
-        # env_state.heights = h
-        # env_state.h_ref = h[np.argmax(v)]
-        # env_state.normalised_wind_speeds = v / np.amax(v)
-        # env_state.plot_wind_profile()
-        # plt.show()
-
-        # find_cut_speed(x0=[1.13764272e+02, 6.08751315e+01, 9.48468048e-01, 2.49842316e+02,
-        #                    5.00000000e+03, 5.00000000e+03, 5.00000000e+03, 2.90299356e+03,
-        #                    5.00000000e+03, 5.00000000e+03, 5.00000000e+03, 5.00000000e+03,
-        #                    5.00000000e+03, 2.81732604e+03, 2.57137223e+03, 2.57137223e+03,
-        #                    2.57137223e+03, 2.57137223e+03, 2.57137223e+03, 2.95622546e+00,
-        #                    2.70502689e+00, 2.53066712e+00, 2.15106589e+00, 2.29456606e+00,
-        #                    1.62580871e+00, 1.70031843e+00, 1.79227046e+00, 1.90501750e+00,
-        #                    1.99054171e+00, 2.08459706e+00, 2.18167218e+00, 2.28132096e+00,
-        #                    2.38136934e+00, 2.47913410e+00, 2.28599887e+01], env_state=env_state)
-        # # Log profile
-        # eval_limit(wind_speeds=[22, 22.5, 22.7, 22.9], cut='out')
-        # eval_limit(wind_speeds=[7, 6.5, 6.4], cut='in')
-        # eval_limit(wind_speeds=np.linspace(7, 22, 6))
-
-        # eval_limit(wind_speeds=[9, 8.5], cut='in')
-        # eval_limit(env_state=env_state, wind_speeds=np.arange(25, 26.5, .5), cut='out')
-        # eval_limit(env_state=LogProfile(), wind_speeds=np.arange(21, 23., .5), cut='out')
-
-        # mpp_curve_res = mpp_curve(env_state, beta_deg=None, vw_step=.5, plot=True)
-
-        if sys_props_v3.tether_diameter == 0.004:
-            if roughness_length == .1:
-                obj_factors_mcp = {'in': -1e-7, 'out': -5e-6}
-                wind_speed_step = [.06, 1.]
-            else:
-                obj_factors_mcp = {'in': -2e-7, 'out': -5e-6}
-                wind_speed_step = [.01, 1.]
-        elif sys_props_v3.tether_diameter == 0.01:  # starting wind speed 11 m/s
-            if roughness_length == .1:
-                obj_factors_mcp = {'in': -1e-7, 'out': -5e-6}
-                wind_speed_step = [.07] + [1.]
-        else:
-            if roughness_length == .1:
-                obj_factors_mcp = {'in': -2e-7, 'out': -1e-6}
-                wind_speed_step = [0.] + [1.]
-        df = construct_power_curve(wind_speed_step, obj_factors_mcp=obj_factors_mcp, env_state=env_state)  #, export_file='opt_res_log_profile.csv')  #, power_optimization_limits=26)  #, export_file='opt_res_llj_profile2.csv')
-        # df = pd.read_csv('opt_res_log_profile.csv')
-        plot_curves_and_trajectories(df, env_state, reference_height, last_i=-2)
-        print('Max. power = {:.3f} kW'.format(df['mcp'].max()*1e-3))
-    plt.show()
+    run_opt_for_shapes()

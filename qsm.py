@@ -176,11 +176,11 @@ class LogProfile(EnvAtmosphericPressure):
             self.wind_speed = self.wind_speed_ref * np.log(height / self.h_0) / np.log(self.h_ref / self.h_0)
         return self.wind_speed
 
-    def plot_wind_profile(self, ax):
+    def plot_wind_profile(self, ax, color=None):
         """Plot the wind speed versus the height above ground."""
         heights = [0, 1, 2, 5, 8, 10., 20., 40., 60., 80., 100., 120., 140., 150., 160., 180., 200., 220., 250., 300., 500., 600.]
         wind_speeds = [self.calculate_wind(h) for h in heights]
-        ax.plot(wind_speeds, heights)
+        ax.plot(wind_speeds, heights, color=color)
         ax.set_xlabel('Wind speed [m/s]')
         ax.set_ylabel('Height [m]')
         ax.set_xlim([0, None])
