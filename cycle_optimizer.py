@@ -275,7 +275,7 @@ class OptimizerReelOutState(Optimizer):
     BOUNDS_REAL_SCALE_DEFAULT = np.array([
         [np.nan, np.nan],
         [0*np.pi/180, 50.*np.pi/180.],
-        [1, 1000],
+        [1, np.inf],
         [0, 15],
         [1, 50],
     ])
@@ -389,7 +389,7 @@ class OptimizerCycleKappa(Optimizer):
         [1, 500],
         [20, 300],
         [0*np.pi/180, 50.*np.pi/180.],
-        [100, np.inf],
+        [100, 750],
     ])
     BOUNDS_REAL_SCALE_DEFAULT = np.append(BOUNDS_REAL_SCALE_DEFAULT, np.empty((np.sum(N_POINTS_PER_PHASE), 2))*np.nan, axis=0)
     BOUNDS_REAL_SCALE_DEFAULT = np.append(BOUNDS_REAL_SCALE_DEFAULT, np.array([[0, 15]] * np.sum(N_POINTS_PER_PHASE)), axis=0)
@@ -514,7 +514,7 @@ class OptimizerCycleCutKappa(Optimizer):
         [1, 500],
         [20, 300],
         [0*np.pi/180, 50.*np.pi/180.],
-        [100, 500],
+        [100, 750],
     ])
     BOUNDS_REAL_SCALE_DEFAULT = np.append(BOUNDS_REAL_SCALE_DEFAULT, np.empty((np.sum(N_POINTS_PER_PHASE), 2))*np.nan, axis=0)
     BOUNDS_REAL_SCALE_DEFAULT = np.append(BOUNDS_REAL_SCALE_DEFAULT, np.array([[0, 15]] * np.sum(N_POINTS_PER_PHASE)), axis=0)
@@ -1736,17 +1736,16 @@ def run_opt_for_shapes(loc='mmc'):
     env_state = LogProfile(reference_height, roughness_length)
     env_state.plot_wind_profile(ax=ax_profiles, color='k')
     obj_factors_mcp = {'in': -2e-7, 'out': -5e-6}
-    wind_speed_step = [0., .5]
-    # df = construct_power_curve(wind_speed_step, obj_factors_mcp=obj_factors_mcp, env_state=env_state,
-    #                            export_file='opt_res_{}/opt_res_{}1.csv'.format(loc, loc))
-    # ax_power_curves.plot(df['vw200'], df['mcp'], '.-', color='k')
+    wind_speed_step = [0., .25]
+    df = construct_power_curve(wind_speed_step, obj_factors_mcp=obj_factors_mcp, env_state=env_state,
+                               export_file='opt_res_{}/opt_res_{}1.csv'.format(loc, loc))
+    ax_power_curves.plot(df['vw200'], df['mcp'], '.-', color='k')
 
     h = [0., 20., 40., 60., 80., 100., 120., 140., 150., 160., 180., 200., 220., 250., 300., 500., 600.]
     hand_picked_shapes = np.load("hand_picked_shapes_{}.npy".format(loc))
-    # obj_factors_mcp['in'] = 0.
-    for i, vw_norm in enumerate(hand_picked_shapes[3:, :]):
+    obj_factors_mcp['in'] = 0.
+    for i, vw_norm in enumerate(hand_picked_shapes):
         vw_norm[0] = 0.
-
         env_state = NormalisedWindTable1D(h, vw_norm)
         env_state.plot_wind_profile(ax=ax_profiles)
         df = construct_power_curve(wind_speed_step, obj_factors_mcp=obj_factors_mcp, env_state=env_state,
