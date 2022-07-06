@@ -6,17 +6,22 @@ from qsm import NormalisedWindTable1D
 from cycle_optimizer import OptimizerCycleKappa
 from kitev3 import sys_props_v3
 
-
-i_cluster = 3
+loc = 'mmij'
 expand_pool = True
 n_nbrs = 5
 gtol = 1e-4
 
+li_f, li_s = [], []
+for i in range(4):
+    s = pd.read_csv('opt_res_{}/succeeded{}.csv'.format(loc, i))
+    li_s.append(s)
 
-queue = pd.read_csv('failed{}.csv'.format(i_cluster))
+    f = pd.read_csv('opt_res_{}/failed{}.csv'.format(loc, i))
+    li_f.append(f)
+pool = pd.concat(li_s, axis=0, ignore_index=True)
+queue = pd.concat(li_f, axis=0, ignore_index=True)
 n_records = queue.shape[0]
 
-pool = pd.read_csv('succeeded{}.csv'.format(i_cluster))
 col_names = list(pool) + ['attempt']
 succeeded = pd.DataFrame(columns=col_names)
 
@@ -41,9 +46,9 @@ for i in range(n_records):
 
     next_opt = queue.iloc[i_next_opt]
     vw = list(next_opt['vw010':'vw600'])
-    env_state = NormalisedWindTable1D()
-    env_state.normalised_wind_speeds = vw
-    env_state.set_reference_wind_speed(1.)
+    vw[0] = 0
+    h = [0., 20., 40., 60., 80., 100., 120., 140., 150., 160., 180., 200., 220., 250., 300., 500., 600.]
+    env_state = NormalisedWindTable1D(h, vw)
 
     print()
     print("#"*10, i, "#"*10)
@@ -104,7 +109,7 @@ for i in range(n_records):
     queue.drop(queue.index[i_next_opt], inplace=True)
     print("{}/{}/{} optimizations succeeded".format(success_counter, i+1, n_records))
 
-succeeded.to_csv('succeeded{}_att2.csv'.format(i_cluster), index=False)
-failed_attempts.to_csv('failed_attempts{}.csv'.format(i_cluster), index=False)
-failed_altogether.to_csv('failed{}_att2.csv'.format(i_cluster), index=False)
+succeeded.to_csv('opt_res_{}/succeeded_att2.csv'.format(loc), index=False)
+failed_attempts.to_csv('opt_res_{}/failed_attempts.csv'.format(loc), index=False)
+failed_altogether.to_csv('opt_res_{}/failed_att2.csv'.format(loc), index=False)
 

@@ -7,19 +7,22 @@ from qsm import NormalisedWindTable1D
 from cycle_optimizer import OptimizerCycleKappa
 from kitev3 import sys_props_v3
 from multiprocessing import Process, cpu_count
+import os
 
-
+loc = 'mmij'
+add_succeeded_mmca = True
 expand_pool = True
 gtol = 1e-4
+heights = [10., 20., 40., 60., 80., 100., 120., 140., 150., 160., 180., 200., 220., 250., 300., 500., 600.]
 
 
-def divide_data_in_batches(n_clusters=4):
-    data = pd.read_csv('wind_profiles_mmij_2008.csv')
+def divide_data_in_batches(year=2008, n_clusters=4):
+    data = pd.read_csv('wind_profiles_{}_{}.csv'.format(loc, year))
     cluster_model = KMeans(n_clusters=n_clusters, random_state=0).fit(data.loc[:, 'vw010':'vw600'])
     for i in range(n_clusters):
         mask = cluster_model.labels_ == i
         print("{} records go in cluster {}".format(np.sum(mask), i))
-        data[mask].to_csv('wind_profiles_mmij_2008_cluster{}.csv'.format(i), index=False)
+        data[mask].to_csv('wind_profiles_{}_{}_cluster{}.csv'.format(loc, year, i), index=False)
 
 
 def xopt2series(x_opt):
@@ -29,15 +32,31 @@ def xopt2series(x_opt):
     return pd.Series(record)
 
 
-def perform_opts(i_cluster):
-    queue = pd.read_csv('wind_profiles_mmij_2008_cluster{}.csv'.format(i_cluster))
+def perform_opts(i_cluster, year=2008):
+    queue = pd.read_csv('wind_profiles_{}_{}_cluster{}.csv'.format(loc, year, i_cluster))
     n_records = queue.shape[0]
 
-    log = pd.read_csv('opt_res_log_profile.csv').loc[:, 'vw010':'x33']
-    log.insert(0, 'id', np.mean(log.loc[:, 'vw010':'vw600'], axis=1).apply(lambda vw: 'log{:011.1f}'.format(vw)))
-    llj = pd.read_csv('opt_res_llj_profile.csv').loc[:, 'vw010':'x33']
-    llj.insert(0, 'id', np.mean(llj.loc[:, 'vw010':'vw600'], axis=1).apply(lambda vw: 'llj{:011.1f}'.format(vw)))
-    pool = pd.concat([log, llj])
+    i = 1
+    pool = []
+    while True:
+        file = 'opt_res_mmca/opt_res_mmca{}.csv'.format(i)
+        if os.path.exists(file):
+            opt_res = pd.read_csv(file).loc[:, 'vw010':'x33']
+            opt_res.insert(0, 'id', np.mean(opt_res.loc[:, 'vw010':'vw600'], axis=1).apply(lambda vw: '{}{}{:09.1f}'.format(loc, str(i), vw)))
+            pool.append(opt_res)
+            i += 1
+        else:
+            break
+    if add_succeeded_mmca:
+        for i in range(4):
+            s = pd.read_csv('opt_res_mmca/succeeded{}.csv'.format(i))
+            pool.append(s)
+
+        s = pd.read_csv('opt_res_mmca/succeeded_att2.csv')
+        pool.append(s)
+    pool = pd.concat(pool, axis=0, ignore_index=True)
+    col_names_pool = ['id'] + ['vw{0:03.0f}'.format(h) for h in heights] + ['x{:02d}'.format(i) for i in range(34)]
+    pool = pool[col_names_pool]
 
     col_names = list(pool) + ['mcp', 'start_id', 'exit_mode']
     col_names.insert(1, 'time')
@@ -57,12 +76,12 @@ def perform_opts(i_cluster):
 
         next_opt = queue.iloc[i_next_opt]
         vw = list(next_opt['vw010':'vw600'])
+        vw[0] = 0
         print()
         print("Mean wind speed: {:.1f} - starting from {}.".format(np.mean(vw), starting_point['id']))
 
-        env_state = NormalisedWindTable1D()
-        env_state.normalised_wind_speeds = vw
-        env_state.set_reference_wind_speed(1.)
+        h = [0., 20., 40., 60., 80., 100., 120., 140., 150., 160., 180., 200., 220., 250., 300., 500., 600.]
+        env_state = NormalisedWindTable1D(h, vw)
 
         oc = OptimizerCycleKappa(sys_props_v3, env_state)
         x0 = starting_point['x00':'x33']
@@ -110,8 +129,8 @@ def perform_opts(i_cluster):
         # if failed_counter == 1:
         #     break
 
-    succeeded.to_csv('succeeded{}.csv'.format(i_cluster), index=False)
-    failed.to_csv('failed{}.csv'.format(i_cluster), index=False)
+    succeeded.to_csv('opt_res_{}/succeeded{}.csv'.format(loc, i_cluster), index=False)
+    failed.to_csv('opt_res_{}/failed{}.csv'.format(loc, i_cluster), index=False)
 
 
 def run_all():
@@ -126,7 +145,7 @@ def run_all():
 
 
 if __name__ == "__main__":
-    perform_opts(0)
     # divide_data_in_batches()
-    # run_all()
+    # perform_opts(0)
+    run_all()
     # print(cpu_count())

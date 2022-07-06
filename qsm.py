@@ -211,8 +211,8 @@ class NormalisedWindTable1D(EnvAtmosphericPressure):
 
     def set_reference_height(self, h_ref):
         self.h_ref = h_ref
-        v_norm_ref = Akima1DInterpolator(self.heights, self.normalised_wind_speeds)(h_ref)
-        self.f = Akima1DInterpolator(self.heights, np.array(self.normalised_wind_speeds)/v_norm_ref)
+        self.wind_speed_ref = Akima1DInterpolator(self.heights, self.normalised_wind_speeds)(h_ref)
+        self.f = Akima1DInterpolator(self.heights, np.array(self.normalised_wind_speeds)/self.wind_speed_ref)
 
     def calculate(self, height, altitude_ground=0.):
         altitude = height + altitude_ground

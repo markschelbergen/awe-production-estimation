@@ -388,7 +388,7 @@ class OptimizerCycleKappa(Optimizer):
     BOUNDS_REAL_SCALE_DEFAULT = np.array([
         [1, 500],
         [20, 300],
-        [0*np.pi/180, 50.*np.pi/180.],
+        [15*np.pi/180, 50.*np.pi/180.],
         [100, 750],
     ])
     BOUNDS_REAL_SCALE_DEFAULT = np.append(BOUNDS_REAL_SCALE_DEFAULT, np.empty((np.sum(N_POINTS_PER_PHASE), 2))*np.nan, axis=0)
@@ -513,7 +513,7 @@ class OptimizerCycleCutKappa(Optimizer):
     BOUNDS_REAL_SCALE_DEFAULT = np.array([
         [1, 500],
         [20, 300],
-        [0*np.pi/180, 50.*np.pi/180.],
+        [15*np.pi/180, 50.*np.pi/180.],
         [100, 750],
     ])
     BOUNDS_REAL_SCALE_DEFAULT = np.append(BOUNDS_REAL_SCALE_DEFAULT, np.empty((np.sum(N_POINTS_PER_PHASE), 2))*np.nan, axis=0)
@@ -1726,30 +1726,38 @@ def plot_constraints(df):
             ax[i, j+1].set_ylabel(k)
 
 
-def run_opt_for_shapes(loc='mmc'):
+def run_opt_for_shapes(loc='mmca', export=False):
     ax_profiles = plt.figure().gca()
     ax_power_curves = plt.figure().gca()
 
-    if loc == 'mmc':
+    obj_factors_mcp = {'in': -2e-7, 'out': -5e-6}
+    wind_speed_step = [0., .3]
+    if loc == 'mmca':
         roughness_length = 0.1
     reference_height = 200
     env_state = LogProfile(reference_height, roughness_length)
     env_state.plot_wind_profile(ax=ax_profiles, color='k')
-    obj_factors_mcp = {'in': -2e-7, 'out': -5e-6}
-    wind_speed_step = [0., .25]
+    if export:
+        export_file = 'opt_res_{}/opt_res_{}1.csv'.format(loc, loc)
+    else:
+        export_file = None
     df = construct_power_curve(wind_speed_step, obj_factors_mcp=obj_factors_mcp, env_state=env_state,
-                               export_file='opt_res_{}/opt_res_{}1.csv'.format(loc, loc))
+                               export_file=export_file)
     ax_power_curves.plot(df['vw200'], df['mcp'], '.-', color='k')
 
     h = [0., 20., 40., 60., 80., 100., 120., 140., 150., 160., 180., 200., 220., 250., 300., 500., 600.]
     hand_picked_shapes = np.load("hand_picked_shapes_{}.npy".format(loc))
-    obj_factors_mcp['in'] = 0.
+    obj_factors_mcp['in'] = 0  #-5e-6
     for i, vw_norm in enumerate(hand_picked_shapes):
         vw_norm[0] = 0.
         env_state = NormalisedWindTable1D(h, vw_norm)
         env_state.plot_wind_profile(ax=ax_profiles)
+        if export:
+            export_file = 'opt_res_{}/opt_res_{}{}.csv'.format(loc, loc, i+2)
+        else:
+            export_file = None
         df = construct_power_curve(wind_speed_step, obj_factors_mcp=obj_factors_mcp, env_state=env_state,
-                                   export_file='opt_res_{}/opt_res_{}{}.csv'.format(loc, loc, i+2))
+                                   export_file=export_file)
         plot_curves_and_trajectories(df, env_state, marker=False, tick_nth_opts=8)
         ax_power_curves.plot(df['vw200'], df['mcp'], '.-')
     plt.show()
@@ -1764,6 +1772,7 @@ def power_curve_thesis_plots():
     df = construct_power_curve(wind_speed_step, obj_factors_mcp=obj_factors_mcp, env_state=env_state)
     plot_curves_and_trajectories(df, env_state, reference_height, last_i=-2)
     print('Max. power = {:.3f} kW'.format(df['mcp'].max()*1e-3))
+    plt.show()
 
 
 def compare_power_curves_tether_diameters():
@@ -1929,3 +1938,4 @@ if __name__ == "__main__":
     # compare_power_curves_tether_diameters()
     # compare_power_curves_power_limits()
     run_opt_for_shapes()
+    # power_curve_thesis_plots()
